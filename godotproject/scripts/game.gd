@@ -4,7 +4,7 @@ extends Node3D
 ## -> Right = serve (random minigame: flip burgers / dance / pray) or Left = attack (arrow sequence).
 
 # (hud.gd mirrors these values - keep the order)
-enum State { TALK, DECIDE, ATTACK, FLIP, DANCE, PRAY, RESOLVING, GAME_OVER_ANIM, GAME_OVER, TITLE, BLACKOUT, INTRO, COUNTDOWN }
+enum State { TALK, DECIDE, ATTACK, FLIP, DANCE, PRAY, RESOLVING, GAME_OVER_ANIM, GAME_OVER, TITLE, BLACKOUT, INTRO, COUNTDOWN, CINEMA }
 
 class Actor extends RefCounted:
 	var data := {}
@@ -19,12 +19,23 @@ class Actor extends RefCounted:
 const CharacterArt := preload("res://scripts/character_art.gd")
 const Hud := preload("res://scripts/hud.gd")
 const Animalese := preload("res://scripts/animalese.gd")
+const Cine := preload("res://scripts/cinematic.gd")
+const VALKYRIES := preload("res://assets/sounds/valkyries.mp3")
+const PARA_START := Vector3(1.6, 15.0, -16.5)
+const PARA_LAND := Vector3(2.6, 0.0, -14.6)   # beside the line in front of the door
 const COUNTDOWN_HIT := preload("res://assets/sounds/philly_hit.ogg")
 const HIT_PITCHES := [1.0, 1.08, 1.17, 1.28]  # 3, 2, 1, GO - each hit a bit higher
 const SCREAM_DIR := "res://assets/sounds/death_screams/scream_%02d.wav"
 const SCREAM_COUNT := 21
 const TIMER_SOUND := preload("res://assets/sounds/timer.mp3")
 const CHIME_SOUND := preload("res://assets/sounds/wind-chime.mp3")
+const HALLELUJAH_SOUND := preload("res://assets/sounds/hallelujah.mp3")
+const CROWD_SOUND := preload("res://assets/sounds/crowd.mp3")
+const PUNCH_SOUND := preload("res://assets/sounds/punch.mp3")
+const CROWD_NEAR := 2.5    # metres: full volume this close to the nearest customer
+const CROWD_FAR := 22.0    # metres: silent from this far away
+const MUSIC_DB := -5.0
+const MUSIC_DUCK_DB := -24.0  # soundtrack level while the holy burger floats
 # Adaptive soundtrack: stems in the order they join (bass always plays).
 const MUSIC_STEMS := ["res://assets/music/bass.wav", "res://assets/music/drums.wav", "res://assets/music/mullet.wav", "res://assets/music/keys.wav"]
 const MUSIC_BPM := 95.0
@@ -124,9 +135,30 @@ const DANCE_WORDS := ["Yeah!", "Woohoo!", "Groovy!", "Hup!", "Olé!"]
 const ATTACK_NAMES := ["Tornado Kick!", "Mega Punch!", "Giant Slap!"]
 
 static var skip_title := false  # set when restarting after game over
+static var skip_cinematic := false  # "Menu" from game over goes straight to the start screen
 
 var state: State = State.TITLE
 var black_alpha := 0.0
+var cine_t := 0.0
+var cine_3d := false
+var cine_landed := false
+var cine_tex := {}
+var para: Actor
+var parachute: Node3D
+var valk_player: AudioStreamPlayer
+var type_players: Array[AudioStreamPlayer] = []
+var type_clacks: Array[AudioStreamWAV] = []
+var type_ding: AudioStreamWAV
+var type_idx := 0
+var typed_shown := {}
+var spoken_lines := {}
+var heli_player: AudioStreamPlayer
+var heli_db := -60.0
+var fx_player: AudioStreamPlayer
+var sizzle_player: AudioStreamPlayer
+var boom_played := false
+var valk_lowpass: AudioEffectLowPassFilter
+var title_t := 0.0
 var countdown_n := 3
 var countdown_t := 0.0
 var intro_tween: Tween
@@ -137,6 +169,11 @@ var screams: Array[AudioStream] = []
 var scream_player: AudioStreamPlayer
 var timer_player: AudioStreamPlayer
 var chime_player: AudioStreamPlayer
+var holy_player: AudioStreamPlayer
+var crowd_player: AudioStreamPlayer
+var punch_player: AudioStreamPlayer
+var crowd_level := 0.0
+var holy_tween: Tween
 var music_player: AudioStreamPlayer
 var music_stream: AudioStreamSynchronized
 var music_level := 0                 # how many stems above the bass are playing (0-3)
@@ -262,6 +299,18 @@ func _ready() -> void:
 	timer_player.volume_db = -4.0
 	add_child(timer_player)
 	setup_music()
+	punch_player = AudioStreamPlayer.new()
+	punch_player.stream = PUNCH_SOUND
+	add_child(punch_player)
+	crowd_player = AudioStreamPlayer.new()
+	var cs: AudioStreamMP3 = CROWD_SOUND.duplicate()
+	cs.loop = true
+	crowd_player.stream = cs
+	crowd_player.volume_db = -60.0
+	add_child(crowd_player)
+	holy_player = AudioStreamPlayer.new()
+	holy_player.stream = HALLELUJAH_SOUND
+	add_child(holy_player)
 	chime_player = AudioStreamPlayer.new()
 	chime_player.stream = CHIME_SOUND
 	chime_player.volume_db = linear_to_db(0.7)  # 30% quieter (about -3 dB)
@@ -276,13 +325,16 @@ func _ready() -> void:
 		hp.stream = COUNTDOWN_HIT
 		add_child(hp)
 		hit_players.append(hp)
+	setup_cinema_audio()
 	if skip_title:
 		skip_title = false
 		shot_overview(0.0)
 		start_countdown()
+	elif skip_cinematic:
+		skip_cinematic = false
+		go_title()
 	else:
-		state = State.TITLE
-		shot(INTRO_A, INTRO_A_LOOK, 0.0)
+		start_cinematic()
 
 
 # ---------------------------------------------------------------- camera shots
@@ -1196,6 +1248,10 @@ func hop(a: Actor, height := 0.25, delay := 0.0) -> void:
 
 func start_blackout() -> void:
 	state = State.BLACKOUT
+	if valk_player.playing:
+		var vt := create_tween()
+		vt.tween_property(valk_player, "volume_db", -60.0, 1.0)
+		vt.tween_callback(valk_player.stop)
 	black_alpha = 1.0
 	get_tree().create_timer(1.0).timeout.connect(start_intro)
 
@@ -1265,7 +1321,7 @@ func setup_music() -> void:
 		music_stream.set_sync_stream_volume(i, stem_db[i])
 	music_player = AudioStreamPlayer.new()
 	music_player.stream = music_stream
-	music_player.volume_db = -5.0
+	music_player.volume_db = MUSIC_DB
 	add_child(music_player)
 
 
@@ -1296,9 +1352,27 @@ func set_stem_db(db: float, i: int) -> void:
 
 func danger_level() -> int:
 	# 1, 2, 3 when the job bar is 3, 2, 1 steps away from the skull (-5).
-	if state in [State.TITLE, State.BLACKOUT, State.INTRO, State.GAME_OVER_ANIM, State.GAME_OVER]:
+	if state in [State.TITLE, State.BLACKOUT, State.INTRO, State.GAME_OVER_ANIM, State.GAME_OVER, State.CINEMA]:
 		return 0
 	return clampi(-bar - 1, 0, 3)
+
+
+func update_crowd_sound(delta: float) -> void:
+	# Crowd chatter during the intro flight, louder the closer the camera gets to the line.
+	var target := 0.0
+	if state == State.INTRO:
+		var nearest := INF
+		for a in queue:
+			nearest = minf(nearest, camera.global_position.distance_to(a.pivot.global_position + Vector3(0, 0.8, 0)))
+		var k := clampf((CROWD_FAR - nearest) / (CROWD_FAR - CROWD_NEAR), 0.0, 1.0)
+		target = k * k * (1.0 - black_alpha)  # also fades in with the picture
+	crowd_level = lerpf(crowd_level, target, 1.0 - exp(-(3.0 if target > crowd_level else 1.8) * delta))
+	if crowd_level > 0.003:
+		if not crowd_player.playing:
+			crowd_player.play()
+		crowd_player.volume_db = linear_to_db(crowd_level)
+	elif crowd_player.playing:
+		crowd_player.stop()
 
 
 func timer_fraction() -> float:
@@ -1339,6 +1413,447 @@ func play_hit() -> void:
 	hp.pitch_scale = HIT_PITCHES[mini(hit_idx, HIT_PITCHES.size() - 1)]
 	hp.play()
 	hit_idx += 1
+
+
+# ---------------------------------------------------------------- opening cinematic
+
+func setup_cinema_audio() -> void:
+	# Valkyries play on their own bus with a low-pass filter (muffled once we're underwater).
+	var bus := AudioServer.get_bus_index("Cinema")
+	if bus < 0:
+		AudioServer.add_bus()
+		bus = AudioServer.bus_count - 1
+		AudioServer.set_bus_name(bus, "Cinema")
+		AudioServer.add_bus_effect(bus, AudioEffectLowPassFilter.new())
+	valk_lowpass = AudioServer.get_bus_effect(bus, 0)
+	valk_lowpass.cutoff_hz = 20000.0
+	# typewriter: a few clack variations + the carriage bell (all generated, no files)
+	for v in 4:
+		type_clacks.append(make_clack(v))
+	type_ding = make_ding()
+	for i in 4:
+		var tp := AudioStreamPlayer.new()
+		tp.volume_db = -4.0
+		add_child(tp)
+		type_players.append(tp)
+	fx_player = AudioStreamPlayer.new()
+	fx_player.stream = make_boom()
+	add_child(fx_player)
+	sizzle_player = AudioStreamPlayer.new()
+	sizzle_player.stream = make_sizzle()
+	sizzle_player.volume_db = -60.0
+	add_child(sizzle_player)
+	heli_player = AudioStreamPlayer.new()
+	heli_player.stream = make_heli_loop()
+	heli_player.volume_db = -60.0
+	add_child(heli_player)
+	valk_player = AudioStreamPlayer.new()
+	valk_player.stream = VALKYRIES
+	valk_player.bus = "Cinema"
+	add_child(valk_player)
+
+
+func make_clack(variant: int) -> AudioStreamWAV:
+	# Typewriter key strike: sharp filtered noise click + short low "thunk" of the typebar.
+	var rate := 22050
+	var n := int(rate * 0.07)
+	var data := PackedByteArray()
+	data.resize(n * 2)
+	var r := RandomNumberGenerator.new()
+	r.seed = 1234 + variant
+	var lp := 0.0
+	var thunk_f := 170.0 + variant * 25.0
+	for i in n:
+		var tt := float(i) / rate
+		var noise := r.randf_range(-1.0, 1.0)
+		lp += (noise - lp) * 0.55
+		var click := (noise - lp) * exp(-tt * 260.0) * 0.9
+		var thunk := sin(TAU * thunk_f * tt) * exp(-tt * 70.0) * 0.55
+		var rattle := lp * exp(-tt * 45.0) * 0.25
+		var v := clampf(click + thunk + rattle, -1.0, 1.0)
+		data.encode_s16(i * 2, int(v * 30000.0))
+	var st := AudioStreamWAV.new()
+	st.format = AudioStreamWAV.FORMAT_16_BITS
+	st.mix_rate = rate
+	st.data = data
+	return st
+
+
+func make_heli_loop() -> AudioStreamWAV:
+	# Seamless 2 s helicopter loop: rotor blade thumps (11 per second), turbine whine and wind.
+	var rate := 22050
+	var n := rate * 2
+	var data := PackedByteArray()
+	data.resize(n * 2)
+	var r := RandomNumberGenerator.new()
+	r.seed = 77
+	var lp := 0.0
+	var lp2 := 0.0
+	var blade := 1.0 / 11.0
+	for i in n:
+		var tt := float(i) / rate
+		var noise := r.randf_range(-1.0, 1.0)
+		lp += (noise - lp) * 0.08
+		lp2 += (lp - lp2) * 0.15
+		var ph := fmod(tt, blade) / blade
+		var thump_env := exp(-ph * 9.0)
+		var thump := (sin(TAU * 55.0 * tt) * 0.7 + lp2 * 3.5) * thump_env
+		var whine := sin(TAU * 1650.0 * tt + sin(TAU * 3.0 * tt) * 2.0) * 0.035
+		var wind := lp * 0.45 * (0.6 + 0.4 * thump_env)
+		var v := clampf((thump + whine + wind) * 0.75, -1.0, 1.0)
+		data.encode_s16(i * 2, int(v * 30000.0))
+	var st := AudioStreamWAV.new()
+	st.format = AudioStreamWAV.FORMAT_16_BITS
+	st.mix_rate = rate
+	st.data = data
+	st.loop_mode = AudioStreamWAV.LOOP_FORWARD
+	st.loop_begin = 0
+	st.loop_end = n
+	return st
+
+
+func make_boom() -> AudioStreamWAV:
+	# Explosion: noise burst + deep falling rumble.
+	var rate := 22050
+	var n := int(rate * 2.2)
+	var data := PackedByteArray()
+	data.resize(n * 2)
+	var r := RandomNumberGenerator.new()
+	r.seed = 9
+	var lp := 0.0
+	for i in n:
+		var tt := float(i) / rate
+		var noise := r.randf_range(-1.0, 1.0)
+		lp += (noise - lp) * lerpf(0.5, 0.03, minf(tt / 1.2, 1.0))
+		var rumble := sin(TAU * lerpf(70.0, 30.0, minf(tt, 1.0)) * tt) * exp(-tt * 2.2)
+		var v := (lp * 2.2 * exp(-tt * 2.8) + rumble * 0.8) * minf(1.0, tt * 300.0)
+		data.encode_s16(i * 2, int(clampf(v, -1.0, 1.0) * 30000.0))
+	var st := AudioStreamWAV.new()
+	st.format = AudioStreamWAV.FORMAT_16_BITS
+	st.mix_rate = rate
+	st.data = data
+	return st
+
+
+func make_sizzle() -> AudioStreamWAV:
+	# Deep-fryer sizzle loop: crackly high noise with random pops.
+	var rate := 22050
+	var n := rate * 2
+	var data := PackedByteArray()
+	data.resize(n * 2)
+	var r := RandomNumberGenerator.new()
+	r.seed = 21
+	var prev := 0.0
+	var pop := 0.0
+	for i in n:
+		var noise := r.randf_range(-1.0, 1.0)
+		var hp := noise - prev
+		prev = noise
+		if r.randf() < 0.002:
+			pop = r.randf_range(0.5, 1.0)
+		pop *= 0.985
+		var v := hp * 0.18 * (0.7 + 0.3 * r.randf()) + noise * pop * 0.5
+		data.encode_s16(i * 2, int(clampf(v, -1.0, 1.0) * 30000.0))
+	var st := AudioStreamWAV.new()
+	st.format = AudioStreamWAV.FORMAT_16_BITS
+	st.mix_rate = rate
+	st.data = data
+	st.loop_mode = AudioStreamWAV.LOOP_FORWARD
+	st.loop_end = n
+	return st
+
+
+func update_heli_sound(delta: float) -> void:
+	# Distant squadron -> roaring cabin during close-ups (ducked under dialogue) -> fly-by -> gone underwater.
+	var t := cine_t
+	var target := -60.0
+	var pitch := 1.0
+	if t >= Cine.T_HELIS and t < Cine.T_CU_COMMANDER:
+		var k := (t - Cine.T_HELIS) / (Cine.T_CU_COMMANDER - Cine.T_HELIS)
+		target = lerpf(-38.0, -12.0, k * k)
+	elif t >= Cine.T_CU_COMMANDER and t < Cine.T_WIDE_JUMP:
+		target = -15.0 if not Cine.current_line(t).is_empty() else -9.0
+		pitch = 0.92  # inside the cabin: lower, rumbly
+	elif t >= Cine.T_WIDE_JUMP and t < Cine.T_CABIN:
+		var k := (t - Cine.T_WIDE_JUMP) / (Cine.T_CABIN - Cine.T_WIDE_JUMP)
+		target = lerpf(-4.0, -16.0, k)
+		pitch = lerpf(1.08, 0.9, k)  # doppler as they roar past
+	elif t >= Cine.T_CABIN and t < Cine.T_CRASH:
+		target = -15.0 if not Cine.current_line(t).is_empty() else -9.0
+		pitch = 0.92 + (sin(t * 9.0) * 0.06 if t > 38.8 else 0.0)  # engine starts to wobble
+	elif t >= Cine.T_CRASH and t < Cine.T_CRASH + Cine.CRASH_IMPACT:
+		var k := (t - Cine.T_CRASH) / Cine.CRASH_IMPACT
+		target = -7.0
+		pitch = lerpf(1.0, 0.5, k) + sin(t * 23.0) * 0.08  # sputtering, dying engine
+	var impact_t := Cine.T_CRASH + Cine.CRASH_IMPACT
+	if t >= impact_t and not boom_played:
+		boom_played = true
+		fx_player.play()
+		shake = 18.0
+	# fryer sizzle over the fish sticks
+	var sz_target := -10.0 if t >= Cine.T_STICKS - 0.4 and t < Cine.T_3D else -60.0
+	if sz_target > -59.0 and not sizzle_player.playing:
+		sizzle_player.play()
+	sizzle_player.volume_db = lerpf(sizzle_player.volume_db, sz_target, 1.0 - exp(-5.0 * delta))
+	if sizzle_player.volume_db < -58.0 and sizzle_player.playing and t >= Cine.T_3D:
+		sizzle_player.stop()
+	if target > -59.0 and not heli_player.playing:
+		heli_player.play()
+	heli_db = lerpf(heli_db, target, 1.0 - exp(-(14.0 if t >= impact_t else 3.0) * delta))
+	heli_player.volume_db = heli_db
+	heli_player.pitch_scale = lerpf(heli_player.pitch_scale, pitch, 1.0 - exp(-4.0 * delta))
+	if heli_db < -58.0 and heli_player.playing and t >= impact_t:
+		heli_player.stop()
+
+
+func update_dialogue() -> void:
+	# Speak each crew line once, in Animalese, when its time comes.
+	for i in Cine.DIALOGUE.size():
+		var d: Array = Cine.DIALOGUE[i]
+		if cine_t >= d[0] and not spoken_lines.has(i):
+			spoken_lines[i] = true
+			voice.speak(d[2], Cine.SPEAKER_PITCH.get(d[1], 1.3), 0.04)
+
+
+func make_ding() -> AudioStreamWAV:
+	# Little carriage-return bell.
+	var rate := 22050
+	var n := int(rate * 0.9)
+	var data := PackedByteArray()
+	data.resize(n * 2)
+	for i in n:
+		var tt := float(i) / rate
+		var env := minf(1.0, tt * 400.0) * exp(-tt * 5.5)
+		var v := (sin(TAU * 2350.0 * tt) * 0.5 + sin(TAU * 3920.0 * tt) * 0.25 + sin(TAU * 5600.0 * tt) * 0.1) * env * 0.6
+		data.encode_s16(i * 2, int(clampf(v, -1.0, 1.0) * 30000.0))
+	var st := AudioStreamWAV.new()
+	st.format = AudioStreamWAV.FORMAT_16_BITS
+	st.mix_rate = rate
+	st.data = data
+	return st
+
+
+func play_type(stream: AudioStreamWAV, pitch: float, vol_db := -4.0) -> void:
+	var tp := type_players[type_idx % type_players.size()]
+	type_idx += 1
+	tp.stream = stream
+	tp.pitch_scale = pitch
+	tp.volume_db = vol_db
+	tp.play()
+
+
+func update_typewriter() -> void:
+	# Clack once for every newly typed character of the current name card; ding when it's done.
+	for who in Cine.CARDS:
+		var lt: float = cine_t - Cine.card_start(who)
+		if lt < 0.0 or lt > 5.0:
+			continue
+		var total: int = Cine.CARDS[who][0].length() + 2 + Cine.CARDS[who][1].length()
+		var n := mini(Cine.typed_count(lt), total)
+		var before: int = typed_shown.get(who, 0)
+		if n > before:
+			var text_all: String = Cine.CARDS[who][0] + "— " + Cine.CARDS[who][1]
+			var ch := text_all[n - 1]
+			if ch != " ":
+				play_type(type_clacks[rng.randi() % type_clacks.size()], rng.randf_range(0.92, 1.12))
+			if n == total:
+				play_type(type_ding, 1.0, -8.0)
+			typed_shown[who] = n
+
+
+func start_cinematic() -> void:
+	state = State.CINEMA
+	cine_t = 0.0
+	cine_3d = false
+	cine_landed = false
+	typed_shown = {}
+	spoken_lines = {}
+	boom_played = false
+	shot(INTRO_A, INTRO_A_LOOK, 0.0)
+	var crew := {
+		"commander": {"color": Color(0.95, 0.55, 0.2), "kind": 0, "hat": 0, "glasses": false, "size": 1.0},
+		"surfer": {"color": Color(0.15, 0.8, 0.95), "kind": 1, "hat": 0, "glasses": false, "size": 1.0},
+		"soldier": {"color": Color(0.95, 0.85, 0.2), "kind": 2, "hat": 0, "glasses": false, "size": 1.0},
+	}
+	for k in crew:
+		cine_tex[k] = art_texture("customer", crew[k])[0]
+	cine_tex["cashier"] = art_texture("cashier_front", {})[0]
+
+
+func seek_cinematic(to_t: float) -> void:
+	# Jump the cinematic to a time (for previewing/testing a shot).
+	cine_t = to_t
+	boom_played = to_t >= Cine.T_CRASH + Cine.CRASH_IMPACT
+	for i in Cine.DIALOGUE.size():
+		if Cine.DIALOGUE[i][0] < to_t - 0.1:
+			spoken_lines[i] = true
+
+
+func update_cinematic(delta: float) -> void:
+	cine_t += delta
+	if cine_t >= Cine.T_MUSIC and not valk_player.playing:
+		valk_player.volume_db = -40.0
+		valk_player.play(Cine.MUSIC_OFFSET)  # skip ahead to the build-up
+		create_tween().tween_property(valk_player, "volume_db", -1.0, 4.0).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+	update_typewriter()
+	update_dialogue()
+	update_heli_sound(delta)
+	if cine_t >= Cine.T_3D and not cine_3d:
+		begin_cine_3d()
+	if cine_3d:
+		update_cine_3d()
+	if cine_t >= Cine.T_END:
+		end_cinematic()
+
+
+func begin_cine_3d() -> void:
+	# Underwater: the cashier parachutes down onto the street in front of the shop.
+	cine_3d = true
+	create_tween().tween_property(valk_lowpass, "cutoff_hz", 900.0, 0.5)
+	para = make_actor("cashier", {}, "cashier_front")
+	para.height = 1.75
+	para.pivot.position = PARA_START
+	parachute = Node3D.new()
+	parachute.position = Vector3(0, 2.6, 0)
+	para.pivot.add_child(parachute)
+	# one solid orange dome + white stripes laid just on top of it (no overlapping z-fighting)
+	var dome := MeshInstance3D.new()
+	var dm := SphereMesh.new()
+	dm.radius = 1.2
+	dm.height = 1.2
+	dm.is_hemisphere = true
+	dome.mesh = dm
+	var dmat := std_mat(Color(1.0, 0.32, 0.08))
+	dmat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	dome.material_override = dmat
+	dome.scale = Vector3(1.0, 0.75, 1.0)
+	parachute.add_child(dome)
+	for k in 4:
+		var stripe := MeshInstance3D.new()
+		var stm := SphereMesh.new()
+		stm.radius = 1.235
+		stm.height = 1.235
+		stm.is_hemisphere = true
+		stripe.mesh = stm
+		var smat := std_mat(Color(1.0, 0.96, 0.88))
+		smat.cull_mode = BaseMaterial3D.CULL_DISABLED
+		stripe.material_override = smat
+		stripe.scale = Vector3(0.16, 0.76, 1.0)
+		stripe.rotation.y = k * PI / 4.0
+		parachute.add_child(stripe)
+	for k in 6:
+		var a := TAU * k / 6.0
+		var line := MeshInstance3D.new()
+		var cm := CylinderMesh.new()
+		cm.top_radius = 0.012
+		cm.bottom_radius = 0.012
+		cm.height = 1.0
+		line.mesh = cm
+		line.material_override = std_mat(Color(0.9, 0.9, 0.85))
+		parachute.add_child(line)
+		beam_between(line, Vector3(cos(a) * 1.15, 0.0, sin(a) * 1.15), Vector3(0, -1.55, 0))
+	var trail := CPUParticles3D.new()
+	var bs := SphereMesh.new()
+	bs.radius = 0.05
+	bs.height = 0.1
+	var bm := ShaderMaterial.new()
+	bm.shader = BUBBLE_SHADER
+	bs.material = bm
+	trail.mesh = bs
+	trail.amount = 30
+	trail.lifetime = 2.5
+	trail.direction = Vector3.UP
+	trail.spread = 25.0
+	trail.gravity = Vector3(0, 0.6, 0)
+	trail.initial_velocity_min = 0.3
+	trail.initial_velocity_max = 0.8
+	trail.local_coords = false
+	trail.position = Vector3(0, 1.0, 0)
+	para.pivot.add_child(trail)
+	update_cine_3d()
+
+
+func update_cine_3d() -> void:
+	var p := cine_t - Cine.T_3D
+	var fall := Cine.T_LAND - Cine.T_3D
+	if para != null and is_instance_valid(para.pivot) and not cine_landed:
+		var k := clampf(p / fall, 0.0, 1.0)
+		var e := 1.0 - pow(1.0 - k, 1.7)
+		var pos := PARA_START.lerp(PARA_LAND, e)
+		pos.x += sin(p * 1.5) * 0.7 * (1.0 - k)
+		para.pivot.position = pos
+		para.body.rotation.z = sin(p * 1.5 + 0.6) * 0.2 * (1.0 - k)
+		parachute.rotation.z = -sin(p * 1.5 + 0.2) * 0.12 * (1.0 - k)
+		if p >= fall:
+			cine_land()
+	# camera: low on the street, tilting down with the descent, slow dolly in
+	var dolly := smoothstep(0.0, 1.0, clampf(p / 7.0, 0.0, 1.0))
+	var cam := Vector3(-0.6, 0.7, -25.5).lerp(Vector3(0.4, 1.5, -20.0), dolly)
+	var target := Vector3(4.5, 1.6, -13.0)
+	if para != null and is_instance_valid(para.pivot):
+		target = para.pivot.position + Vector3(0, 1.4, 0)
+		if cine_landed:
+			target = target.lerp(Vector3(4.8, 1.8, -12.6), clampf((p - fall) / 1.5, 0.0, 1.0))
+	camera.look_at_from_position(cam, target)
+
+
+func cine_land() -> void:
+	cine_landed = true
+	shake = 12.0
+	var pv := para.pivot
+	var tw := pv.create_tween()
+	tw.tween_property(pv, "scale", Vector3(1.35, 0.6, 1), 0.08)
+	tw.tween_property(pv, "scale", Vector3.ONE, 0.18).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	# canopy collapses and settles behind him
+	var ct := parachute.create_tween().set_parallel(true)
+	ct.tween_property(parachute, "position", Vector3(-0.9, 0.25, 0.4), 0.9).set_trans(Tween.TRANS_SINE)
+	ct.tween_property(parachute, "scale", Vector3(1.3, 0.12, 1.3), 0.9)
+	ct.tween_property(parachute, "rotation:z", 0.4, 0.9)
+	# sand puff
+	var puff := CPUParticles3D.new()
+	var sm := SphereMesh.new()
+	sm.radius = 0.12
+	sm.height = 0.24
+	sm.material = std_mat(Color(0.9, 0.82, 0.6))
+	puff.mesh = sm
+	puff.one_shot = true
+	puff.explosiveness = 1.0
+	puff.amount = 26
+	puff.lifetime = 1.0
+	puff.direction = Vector3.UP
+	puff.spread = 80.0
+	puff.gravity = Vector3(0, -1.0, 0)
+	puff.initial_velocity_min = 1.0
+	puff.initial_velocity_max = 2.2
+	puff.position = PARA_LAND + Vector3(0, 0.1, 0)
+	add_child(puff)
+	puff.emitting = true
+	get_tree().create_timer(1.5).timeout.connect(puff.queue_free)
+	# then he unclips and waddles straight past the queue into the shop
+	tw.tween_interval(0.5)
+	tw.tween_property(pv, "position", DOOR_POS + Vector3(-0.35, 0, -0.2), 1.2)
+	tw.parallel().tween_method(func(k: float): para.body.position.y = BODY_Y + absf(sin(k * PI * 5.0)) * 0.18, 0.0, 1.0, 1.2)
+	tw.tween_property(pv, "position", DOOR_POS + Vector3(-0.35, 0, 0.6), 0.3)
+
+
+func end_cinematic() -> void:
+	voice.stop()
+	heli_player.stop()
+	sizzle_player.stop()
+	if para != null and is_instance_valid(para.pivot):
+		para.pivot.queue_free()
+	para = null
+	cine_3d = false
+	shake = 0.0
+	create_tween().tween_property(valk_lowpass, "cutoff_hz", 20000.0, 0.6)
+	create_tween().tween_property(valk_player, "volume_db", -10.0, 1.0)
+	go_title()
+
+
+func go_title() -> void:
+	state = State.TITLE
+	title_t = 0.0
+	shot(INTRO_A, INTRO_A_LOOK, 0.0)
 
 
 # ---------------------------------------------------------------- customer flow
@@ -1609,6 +2124,22 @@ func pray_input(dir: int) -> void:
 		pray_success()
 
 
+func holy_audio(start: bool, fade := 0.25) -> void:
+	# Duck the soundtrack and sing hallelujah only while the holy burger floats.
+	if holy_tween:
+		holy_tween.kill()
+	holy_tween = create_tween().set_parallel(true)
+	if start:
+		holy_player.volume_db = -30.0
+		holy_player.play()
+		holy_tween.tween_property(holy_player, "volume_db", 0.0, fade)
+		holy_tween.tween_property(music_player, "volume_db", MUSIC_DUCK_DB, fade)
+	else:
+		holy_tween.tween_property(holy_player, "volume_db", -40.0, fade)
+		holy_tween.tween_property(music_player, "volume_db", MUSIC_DB, fade * 2.0)
+		holy_tween.chain().tween_callback(holy_player.stop)
+
+
 func pray_success() -> void:
 	state = State.RESOLVING
 	cashier.body.rotation.z = 0.0
@@ -1632,11 +2163,13 @@ func pray_success() -> void:
 	beam.position = c.pivot.position + Vector3(0, 3.0, 0)
 	add_child(beam)
 	var wb := flying_sprite(winged_tex, c.pivot.position + Vector3(0, 4.2, 0.05), 1.3)
+	holy_audio(true)
 	var tw := create_tween()
 	tw.tween_property(bm, "shader_parameter/strength", 0.55, 0.3)
 	tw.tween_property(wb, "position", chest(c) + Vector3(0, 0.15, 0.05), 1.6).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
 	tw.parallel().tween_method(func(v: float): wb.scale = Vector3(1.0 + 0.18 * sin(v), 1, 1), 0.0, TAU * 6.0, 1.6)
 	tw.tween_property(bm, "shader_parameter/strength", 0.0, 0.25)
+	tw.parallel().tween_callback(holy_audio.bind(false, 0.25))
 	tw.tween_callback(func():
 		wb.queue_free()
 		beam.queue_free()
@@ -1704,6 +2237,8 @@ func hitstop(dur := 0.09) -> void:
 
 
 func impact(c: Actor, power: float) -> void:
+	punch_player.pitch_scale = rng.randf_range(0.92, 1.08)
+	punch_player.play()
 	hitstop()
 	shake = power
 	c.say = "OUCH!"
@@ -2003,6 +2538,7 @@ func kick_cashier() -> void:
 func restart(to_title: bool) -> void:
 	# Try again skips straight to the countdown; Menu goes back to the start screen.
 	skip_title = not to_title
+	skip_cinematic = to_title
 	get_tree().reload_current_scene()
 
 
@@ -2049,6 +2585,10 @@ func _process(delta: float) -> void:
 	handle_input()
 	layout_queue()
 	match state:
+		State.CINEMA:
+			update_cinematic(delta)
+		State.TITLE:
+			title_t += delta
 		State.COUNTDOWN:
 			countdown_t += delta
 			if countdown_n > 0 and countdown_t >= 0.8:
@@ -2109,6 +2649,7 @@ func _process(delta: float) -> void:
 		p["pos"] = p["pos"] + Vector2(0, -p["rise"] * delta)
 	popups = popups.filter(func(p): return p["t"] < p["life"])
 	update_timer_sound()
+	update_crowd_sound(delta)
 	bar_shown = lerpf(bar_shown, float(bar), 1.0 - exp(-12.0 * delta))
 	shake = maxf(0.0, shake - 40.0 * delta)
 	var dl := danger_level()
@@ -2147,8 +2688,11 @@ func handle_input() -> void:
 	var any_just := any_now and not prev_any
 	prev_any = any_now
 	match state:
+		State.CINEMA:
+			if any_just and cine_t > 0.5:
+				end_cinematic()
 		State.TITLE:
-			if any_just:
+			if any_just and title_t > 0.4:
 				start_blackout()
 		State.INTRO:
 			if any_just:

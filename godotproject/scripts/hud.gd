@@ -3,6 +3,7 @@ extends Node2D
 ## HUD, speech/thought bubbles, minigame UIs, popups, title, countdown, game over window.
 
 const Toon := preload("res://scripts/toon_ui.gd")
+const Cine := preload("res://scripts/cinematic.gd")
 const FONT_FILE := preload("res://assets/fonts/Fredoka.ttf")
 const LOGO := preload("res://assets/logo.png")
 
@@ -18,6 +19,7 @@ const S_TITLE := 9
 const S_BLACKOUT := 10
 const S_INTRO := 11
 const S_COUNTDOWN := 12
+const S_CINEMA := 13
 
 const STAR_SCORES := [100, 600, 2000]  # game over rating: 1 / 2 / 3 stars
 
@@ -110,6 +112,9 @@ func _draw() -> void:
 		return
 	var st: int = g.state
 	match st:
+		S_CINEMA:
+			Cine.draw(self, font, g, W, H)
+			return
 		S_TITLE:
 			draw_title()
 			return
@@ -459,6 +464,8 @@ func draw_title() -> void:
 	draw_texture_rect(LOGO, Rect2(c - Vector2(w, h) / 2.0, Vector2(w, h)), false)
 	var blink := 0.6 + 0.4 * sin(g.t * 3.5)
 	text(Vector2(0, c.y + h / 2.0 + 48), "Press any key to start", 26, Color(Toon.CREAM, blink), HORIZONTAL_ALIGNMENT_CENTER, W)
+	if g.title_t < 1.2:
+		draw_rect(Rect2(0, 0, W, H), Color(0, 0, 0, 1.0 - g.title_t / 1.2))
 
 
 func draw_countdown() -> void:
