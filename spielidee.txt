@@ -1,0 +1,25 @@
+Dieses endlose Arcade-Spielkonzept konzentriert sich auf rasante Entscheidungen, Highscore-Jagd und eine dynamische UI-Leiste, die deinen Job in der Krossen Krabbe bestimmt. Die Kunden stehen in einer endlosen Schlange bis nach draußen, und du musst als Thaddäus unter wachsendem Zeitdruck reagieren.
+
+Hier ist der Ablauf verständlich und entwicklerfreundlich zusammengefasst:
+
+⚬     Die endlose Schlange & Zeitdruck: Ein Kunde nach dem anderen tritt an die Kasse. Du musst erkennen, ob er nett oder böse ist. Zu Beginn hast du dafür 5 Sekunden Zeit, aber mit jedem richtig abgefertigten Kunden läuft der Timer schneller ab.
+⚬     Die Entscheidung (Die Tasten): Du hast zwei Optionen:
+    ⚬         Taste Rechts: "Kunde bedienen"
+    ⚬         Taste Links: "Kunden angreifen"
+    ⚬         Die eiserne Regel: Die Aktion wird immer ausgeführt, unabhängig davon, ob sie richtig oder falsch war (du kannst also einen netten Kunden angreifen oder einen fiesen Kunden normal bedienen).
+⚬     Das Angriffs-Minispiel: Entscheidest du dich für "Angreifen", hast du 3 Sekunden Zeit, eine vorgegebene Tastenfolge fehlerfrei einzutippen.
+    ⚬         Erfolg: Thaddäus führt einen von 10 zufälligen, verrückten Angriffen aus.
+    ⚬         Fehlschlag: Es passiert gar nichts. Der Kunde verlässt enttäuscht den Laden und sagt z. B. "Schlechter Service".
+
+Punktesystem, Streak & UI:
+
+⚬     Punkte & Multiplikator: Oben links siehst du deinen Gesamt-Score, oben rechts den Multiplikator. Jeder richtig behandelte Kunde bringt dir 10 Punkte × Multiplikator.
+⚬     Streak-Boni: Jede richtige Entscheidung in Folge erhöht deinen Multiplikator. Zur Belohnung poppen motivierende Wörter wie Cool!, Nice!, Awesome! oder Money! auf dem Bildschirm auf. Eine einzige falsche Entscheidung bricht die Streak und der Multiplikator wird zurückgesetzt.
+⚬     Die Job-Leiste (Oben in der Mitte): Das ist deine Lebensanzeige. In der Mitte startet ein Zeiger. Der Balken hat 5 Schritte nach rechts (grüner Bereich) und 5 Schritte nach links (roter Bereich, ganz links ist ein Totenkopf).
+    ⚬         Bei einer richtigen Entscheidung: Der Zeiger rückt einen Schritt nach rechts (maximal bis Stufe +5).
+    ⚬         Bei einer falschen Entscheidung: Der Zeiger rückt einen Schritt nach links zum Totenkopf. Zusätzlich taucht Mr. Krabs am Bildschirmrand auf und schreit dich wütend wegen Geld an.
+    ⚬         Puffer-System: Wenn du extrem gut spielst und der Zeiger ganz rechts ist, müsstest du 10 Fehlentscheidungen hintereinander treffen, um komplett in den roten Bereich abzurutschen.
+
+Game Over:
+
+⚬     Sobald der Zeiger das linke Ende (den Totenkopf) erreicht, ist das Spiel sofort vorbei. Mr. Krabs fliegt aus 10 Metern Entfernung mit einem Tornado-Kick in den Bildschirm, kickt Thaddäus weg und ein großer Schriftzug erscheint: „Du bist gefeuert!“

@@ -1,0 +1,13 @@
+# macOS
+.DS_Store
+
+# Godot cache (regenerated automatically)
+.godot/
+godotproject/.godot/
+godotproject/android/
+
+# Local Python environment for the whisper tool (1 GB, reinstall with pip)
+whisper_tools/venv/
+
+# Menu sounds ripped from a commercial game - not ours to distribute
+sounds/frontend ui/
