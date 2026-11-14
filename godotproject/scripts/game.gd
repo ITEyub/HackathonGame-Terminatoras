@@ -19,6 +19,7 @@ class Actor extends RefCounted:
 const CharacterArt := preload("res://scripts/character_art.gd")
 const Hud := preload("res://scripts/hud.gd")
 const Menu := preload("res://scripts/menu.gd")
+const Scores := preload("res://scripts/scores.gd")
 const Animalese := preload("res://scripts/animalese.gd")
 const Cine := preload("res://scripts/cinematic.gd")
 const VALKYRIES := preload("res://assets/sounds/valkyries.mp3")
@@ -195,7 +196,18 @@ var cashier: Actor
 var boss: Actor
 var camera: Camera3D
 var cam_tween: Tween
+# chase cam: after a hit the camera tracks and zooms in on the flying fish for a moment
+const CHASE_TIME := 0.6
+const CHASE_FILL := 0.42  # how much of the screen height the fish should fill
+var chase_actor: Actor
+var chase_t := 0.0
+var chase_zoom := 0.0
+var chase_fov := 30.0
+var chase_point := Vector3.ZERO
+var chase_hold := false  # fish exploded: keep looking at the explosion
+var boom_player: AudioStreamPlayer
 var hud: Node2D
+var scores: Node2D  # name entry + highscore table after a game over (scores.gd)
 var menu: Node2D  # pause menu / options / title quit button (menu.gd)
 var burger_tex: Texture2D
 var tray_tex: Texture2D
@@ -248,6 +260,7 @@ var rng := RandomNumberGenerator.new()
 
 
 func _ready() -> void:
+	get_tree().node_added.connect(_on_node_added)  # before anything is built: see optimize_mesh()
 	rng.randomize()
 	load_highscore()
 	build_world()
@@ -256,6 +269,11 @@ func _ready() -> void:
 	winged_tex = art_texture("winged_burger", {})[0]
 	glove_tex = art_texture("glove", {})[0]
 	hand_tex = art_texture("hand", {})[0]
+	build_warm_rig()
+	boom_player = AudioStreamPlayer.new()  # generated up front: building it mid-game costs a frame
+	boom_player.stream = make_boom()
+	boom_player.volume_db = -3.0
+	add_child(boom_player)
 	Engine.time_scale = 1.0
 	cashier = make_actor("cashier", {}, "cashier_front")
 	cashier.pivot.position = CASHIER_POS
@@ -263,6 +281,11 @@ func _ready() -> void:
 	boss = make_actor("boss", {})
 	boss.height = 2.0
 	boss.pivot.visible = false
+	# the boss is hidden until his first shout: keep a sub-pixel copy on screen so that first
+	# appearance doesn't have to build his shader mid-game (see build_warm_rig)
+	var boss_warm: Sprite3D = boss.sprite.duplicate()
+	boss_warm.no_depth_test = true
+	camera.get_node("WarmRig").add_child(boss_warm)
 	for i in QUEUE_TOTAL:
 		queue.append(make_actor("customer", make_customer_data(), "customer_back"))
 	layout_queue()
@@ -292,6 +315,9 @@ func _ready() -> void:
 	hud = Hud.new()
 	hud.game = self
 	layer.add_child(hud)
+	scores = Scores.new()
+	scores.game = self
+	layer.add_child(scores)
 	var mlayer := CanvasLayer.new()
 	mlayer.layer = 5
 	add_child(mlayer)
@@ -474,6 +500,10 @@ func build_world() -> void:
 	sun.rotation_degrees = Vector3(-55, -25, 0)
 	sun.light_energy = 0.35
 	sun.shadow_enabled = true
+	# Default is 4 shadow splits over 100 m: every shadow caster is drawn 4 extra times.
+	# 2 splits over 60 m draws half as much and gives each split more shadow-map pixels (sharper).
+	sun.directional_shadow_mode = DirectionalLight3D.SHADOW_PARALLEL_2_SPLITS
+	sun.directional_shadow_max_distance = 60.0
 	add_child(sun)
 	var lamp := OmniLight3D.new()
 	lamp.position = Vector3(0, 3.4, -1.5)
@@ -2324,19 +2354,275 @@ func impact_burst(pos: Vector3) -> void:
 	get_tree().create_timer(1.0, false).timeout.connect(sparks.queue_free)
 
 
-func launch(c: Actor, offset: Vector3, dur: float, spin_z: float, spin_y := 0.0) -> Tween:
-	# Send a customer flying with a ballistic arc and spin, then remove it.
+func start_chase(c: Actor, dur := CHASE_TIME) -> void:
+	if is_over():
+		return
+	if cam_tween:
+		cam_tween.kill()
+	chase_actor = c
+	chase_hold = false
+	chase_t = dur
+	chase_fov = BASE_FOV * 0.7
+
+
+func update_chase(delta: float) -> void:
+	# Called every frame after the base FOV is set. Tracks the flying fish, then holds on the
+	# spot where it exploded.
+	if chase_t > 0.0 and not is_over():
+		chase_t -= delta
+		var size := 0.0
+		if chase_actor != null and is_instance_valid(chase_actor.pivot):
+			size = chase_actor.height * chase_actor.pivot.scale.y
+			chase_point = chase_actor.pivot.global_position + Vector3(0, size * 0.5, 0)
+		elif chase_hold:
+			size = 2.4  # frame the whole explosion
+		else:
+			chase_t = 0.0
+		var dist := chase_point.distance_to(camera.global_position)
+		if chase_t > 0.0 and dist > 0.2:
+			var q := Transform3D(Basis(), camera.position).looking_at(chase_point, Vector3.UP).basis.get_rotation_quaternion()
+			camera.quaternion = camera.quaternion.slerp(q, 1.0 - exp(-45.0 * delta))
+			# zoom so the fish keeps about the same size on screen however far it flies
+			var want := rad_to_deg(2.0 * atan(size / CHASE_FILL / 2.0 / dist))
+			chase_fov = lerpf(chase_fov, clampf(want, 7.0, BASE_FOV * 0.8), 1.0 - exp(-25.0 * delta))
+			chase_zoom = lerpf(chase_zoom, 1.0, 1.0 - exp(-16.0 * delta))
+		if chase_t <= 0.0:
+			chase_t = 0.0
+			chase_actor = null
+			chase_hold = false
+			if state == State.RESOLVING:
+				shot_overview(0.4)
+	else:
+		chase_t = 0.0
+		chase_zoom = lerpf(chase_zoom, 0.0, 1.0 - exp(-9.0 * delta))
+	camera.fov = lerpf(camera.fov, chase_fov, chase_zoom)
+
+
+func launch(c: Actor, wall: String, dur: float, spin_z: float, spin_y := 0.0) -> Tween:
+	# Send a customer flying across the room into a wall ("left" | "right" | "back"),
+	# where it explodes.
 	var start := c.pivot.position
+	var target: Vector3
+	var normal: Vector3
+	match wall:
+		"left":
+			target = Vector3(-5.8, 2.3, start.z - 2.0)
+			normal = Vector3(1, 0, 0)
+		"right":
+			target = Vector3(5.8, 2.9, clampf(start.z - 3.5, -11.0, 4.0))
+			normal = Vector3(-1, 0, 0)
+		_:
+			target = Vector3(clampf(start.x + 0.5, -5.0, 4.2), 2.5, -12.3)
+			normal = Vector3(0, 0, 1)
+	start_chase(c, dur + 0.6)
 	var tw := create_tween().set_parallel(true)
-	tw.tween_property(c.pivot, "position:x", start.x + offset.x, dur)
-	tw.tween_property(c.pivot, "position:z", start.z + offset.z, dur)
-	tw.tween_method(func(k: float): c.pivot.position.y = start.y + offset.y * sin(k * PI * 0.75) * 1.4, 0.0, 1.0, dur)
+	tw.tween_method(func(k: float):
+		c.pivot.position = start.lerp(target - Vector3(0, c.height * 0.5, 0), k) + Vector3(0, sin(k * PI) * 0.7, 0), 0.0, 1.0, dur)
 	tw.tween_property(c.body, "rotation:z", spin_z, dur)
 	if spin_y != 0.0:
 		tw.tween_property(c.body, "rotation:y", spin_y, dur)
-	tw.tween_property(c.pivot, "scale", Vector3.ONE * 0.5, dur)
-	tw.chain().tween_callback(free_actor.bind(c))
+	tw.tween_property(c.pivot, "scale", Vector3.ONE, dur * 0.5)
+	tw.chain().tween_callback(explode_fish.bind(c, target, normal))
 	return tw
+
+
+# ---------------------------------------------------------------- wall explosion
+
+func fx_mat(col: Color, emission := 3.0) -> StandardMaterial3D:
+	var m := std_mat(col, emission)
+	m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	m.cull_mode = BaseMaterial3D.CULL_DISABLED
+	return m
+
+
+func fx_mesh(parent: Node3D, mesh: Mesh, mat: Material, pos := Vector3.ZERO) -> MeshInstance3D:
+	var mi := MeshInstance3D.new()
+	mi.mesh = mesh
+	mi.material_override = mat
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	mi.position = pos
+	parent.add_child(mi)
+	return mi
+
+
+func fx_particles(parent: Node3D, mesh: Mesh, amount: int, life: float, vmin: float, vmax: float, spread: float, gravity: Vector3) -> CPUParticles3D:
+	var p := CPUParticles3D.new()
+	p.mesh = mesh
+	p.one_shot = true
+	p.explosiveness = 1.0
+	p.amount = amount
+	p.lifetime = life
+	p.direction = Vector3(0, 0, 1)  # out of the wall
+	p.spread = spread
+	p.gravity = gravity
+	p.initial_velocity_min = vmin
+	p.initial_velocity_max = vmax
+	p.scale_amount_min = 0.5
+	p.scale_amount_max = 1.6
+	p.position = Vector3(0, 0, 0.15)
+	parent.add_child(p)
+	p.emitting = true
+	return p
+
+
+func explode_fish(c: Actor, pos: Vector3, normal: Vector3) -> void:
+	# The fish hits the wall and goes off like a firework: flash, fireballs, shockwave rings,
+	# comic impact lines, chunks, sparks, bubbles, a paint splat and two flying eyeballs.
+	var col: Color = c.data.get("color", Color(1, 0.6, 0.2))
+	free_actor(c)
+	shake = 38.0
+	hitstop(0.08)
+	boom_player.pitch_scale = rng.randf_range(0.95, 1.25)
+	boom_player.play()
+	add_popup(pick(["KABOOM!", "SPLAT!", "BOOM!", "KA-POW!"]), Vector2(rng.randf_range(-60, 60), 330), Color(1, 0.85, 0.2), 54, 1.0)
+	if chase_t > 0.0:
+		chase_actor = null
+		chase_hold = true
+		chase_point = pos + normal * 0.4
+	var root := Node3D.new()
+	root.position = pos
+	root.basis = Basis.looking_at(-normal, Vector3.UP)  # local +Z points out of the wall
+	add_child(root)
+	get_tree().create_timer(3.2, false).timeout.connect(root.queue_free)
+
+	# light flash
+	var light := OmniLight3D.new()
+	light.position = Vector3(0, 0, 0.8)
+	light.omni_range = 10.0
+	light.light_color = Color(1, 0.8, 0.5)
+	light.light_energy = 12.0
+	root.add_child(light)
+	create_tween().tween_property(light, "light_energy", 0.0, 0.45)
+
+	# white flash ball
+	var sphere := SphereMesh.new()
+	sphere.radius = 0.5
+	sphere.height = 1.0
+	var fm := fx_mat(Color(1, 1, 0.9, 0.95), 4.0)
+	var flash := fx_mesh(root, sphere, fm, Vector3(0, 0, 0.2))
+	flash.scale = Vector3.ONE * 0.4
+	var ft := create_tween().set_parallel(true)
+	ft.tween_property(flash, "scale", Vector3.ONE * 5.5, 0.16).set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
+	ft.tween_property(fm, "albedo_color:a", 0.0, 0.16)
+
+	# fireballs
+	for i in 9:
+		var fc: Color = [Color(1, 0.55, 0.1), Color(1, 0.85, 0.2), col.lightened(0.3), Color(1, 0.3, 0.15)][i % 4]
+		var m := fx_mat(fc, 3.0)
+		var ball := fx_mesh(root, sphere, m, Vector3(rng.randf_range(-0.9, 0.9), rng.randf_range(-0.9, 0.9), rng.randf_range(0.2, 0.9)))
+		ball.scale = Vector3.ZERO
+		var bt := create_tween()
+		bt.tween_interval(i * 0.018)
+		bt.tween_property(ball, "scale", Vector3.ONE * rng.randf_range(1.0, 2.0), 0.16).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+		bt.tween_property(ball, "scale", Vector3.ONE * 0.2, 0.4).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+		bt.parallel().tween_property(m, "albedo_color:a", 0.0, 0.4)
+		bt.parallel().tween_property(ball, "position:z", ball.position.z + 0.8, 0.4)
+
+	# shockwave rings on the wall
+	var torus := TorusMesh.new()
+	torus.inner_radius = 0.86
+	torus.outer_radius = 1.0
+	for i in 2:
+		var m := fx_mat(Color(1, 1, 1, 0.9) if i == 0 else Color(col.lightened(0.4), 0.9), 2.5)
+		var ring := fx_mesh(root, torus, m, Vector3(0, 0, 0.06 + i * 0.05))
+		ring.rotation.x = PI / 2.0
+		ring.scale = Vector3.ONE * 0.2
+		var rt := create_tween()
+		rt.tween_interval(i * 0.09)
+		rt.tween_property(ring, "scale", Vector3(5.5, 1.0, 5.5) if i == 0 else Vector3(3.8, 1.0, 3.8), 0.45).set_trans(Tween.TRANS_QUART).set_ease(Tween.EASE_OUT)
+		rt.parallel().tween_property(m, "albedo_color:a", 0.0, 0.45)
+
+	# comic impact lines radiating over the wall
+	var line := BoxMesh.new()
+	line.size = Vector3(0.09, 1.0, 0.03)
+	for i in 12:
+		var ang := TAU * i / 12.0 + rng.randf_range(-0.12, 0.12)
+		var dir := Vector3(sin(ang), cos(ang), 0)
+		var m := fx_mat(Color(1, 0.95, 0.4, 1.0), 3.0)
+		var l := fx_mesh(root, line, m, dir * 0.7 + Vector3(0, 0, 0.08))
+		l.rotation.z = -ang
+		l.scale = Vector3(1, 0.1, 1)
+		var lt := create_tween()
+		var reach := rng.randf_range(1.6, 2.8)
+		lt.tween_property(l, "position", dir * reach + Vector3(0, 0, 0.08), 0.14).set_trans(Tween.TRANS_EXPO).set_ease(Tween.EASE_OUT)
+		lt.parallel().tween_property(l, "scale:y", rng.randf_range(1.0, 1.9), 0.14)
+		lt.tween_property(l, "scale", Vector3(0.1, 0.1, 1), 0.22)
+		lt.parallel().tween_property(l, "position", dir * (reach + 0.9) + Vector3(0, 0, 0.08), 0.22)
+
+	# chunks of fish
+	var chunk := BoxMesh.new()
+	chunk.size = Vector3.ONE * 0.16
+	var cm := std_mat(Color.WHITE)
+	cm.vertex_color_use_as_albedo = true
+	chunk.material = cm
+	var chunks := fx_particles(root, chunk, 80, 1.3, 4.0, 13.0, 78.0, Vector3(0, -11, 0))
+	chunks.color = col
+	chunks.hue_variation_min = -0.06
+	chunks.hue_variation_max = 0.06
+	# sparks
+	var spark := SphereMesh.new()
+	spark.radius = 0.045
+	spark.height = 0.09
+	spark.material = std_mat(Color(1, 0.95, 0.6), 3.0)
+	fx_particles(root, spark, 60, 0.6, 8.0, 19.0, 85.0, Vector3(0, -5, 0))
+	# bubbles (we're underwater after all)
+	var bub := SphereMesh.new()
+	bub.radius = 0.09
+	bub.height = 0.18
+	bub.material = fx_mat(Color(0.8, 0.97, 1.0, 0.45), 0.6)
+	fx_particles(root, bub, 40, 1.8, 1.0, 5.0, 70.0, Vector3(0, 3.5, 0))
+
+	# paint splat left on the wall, dripping away
+	var disc := CylinderMesh.new()
+	disc.top_radius = 1.0
+	disc.bottom_radius = 1.0
+	disc.height = 0.02
+	var sm := fx_mat(Color(col.darkened(0.1), 0.95), 0.0)
+	var blobs: Array = [[Vector3.ZERO, 1.25]]
+	for i in 9:
+		var a := rng.randf() * TAU
+		blobs.append([Vector3(cos(a), sin(a), 0) * rng.randf_range(0.9, 2.0), rng.randf_range(0.15, 0.5)])
+	for bl in blobs:
+		var d := fx_mesh(root, disc, sm, bl[0] + Vector3(0, 0, 0.03))
+		d.rotation.x = PI / 2.0
+		d.scale = Vector3.ONE * 0.1
+		var size: float = bl[1]
+		var dt := create_tween()
+		dt.tween_property(d, "scale", Vector3(size, 1, size), 0.18).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+		dt.tween_interval(0.9)
+		# drip: stretch downwards
+		dt.tween_property(d, "scale", Vector3(size * 0.8, 1, size * 1.5), 1.2)
+		dt.parallel().tween_property(d, "position:y", d.position.y - size * 0.7, 1.2)
+	var st := create_tween()
+	st.tween_interval(1.6)
+	st.tween_property(sm, "albedo_color:a", 0.0, 1.2)
+
+	# two eyeballs fly off and bounce on the floor
+	var eye_mesh := SphereMesh.new()
+	eye_mesh.radius = 0.14
+	eye_mesh.height = 0.28
+	var pupil_mesh := SphereMesh.new()
+	pupil_mesh.radius = 0.07
+	pupil_mesh.height = 0.14
+	for i in 2:
+		var eye := fx_mesh(root, eye_mesh, std_mat(Color.WHITE, 0.3), Vector3(0, 0, 0.3))
+		fx_mesh(eye, pupil_mesh, std_mat(Color(0.05, 0.05, 0.1)), Vector3(0, 0, 0.1))
+		var from := eye.position
+		var land := Vector3(rng.randf_range(0.5, 2.2) * (1.0 if i == 0 else -1.0), 0.14 - pos.y, rng.randf_range(1.6, 3.6))
+		var top := rng.randf_range(0.8, 1.8)
+		var et := create_tween()
+		et.tween_method(func(k: float):
+			eye.position = from.lerp(land, k) + Vector3(0, sin(k * PI) * top, 0)
+			eye.rotation = Vector3(k * 9.0, k * 6.0, 0), 0.0, 1.0, 0.7)
+		for bounce in 2:
+			var h := 0.5 / (bounce + 1.0)
+			var b0 := land + Vector3(0, 0, 0.5 * bounce)
+			var b1 := land + Vector3(0, 0, 0.5 * (bounce + 1))
+			et.tween_method(func(k: float):
+				eye.position = b0.lerp(b1, k) + Vector3(0, sin(k * PI) * h, 0)
+				eye.rotation.x += 0.2, 0.0, 1.0, 0.25)
+		et.tween_interval(0.6)
+		et.tween_property(eye, "scale", Vector3.ZERO, 0.25)
 
 
 func attack_tornado_kick(c: Actor) -> void:
@@ -2374,7 +2660,7 @@ func attack_tornado_kick(c: Actor) -> void:
 	tw.tween_callback(func():
 		cashier.body.rotation.y = 0.0
 		impact(c, 22.0)
-		launch(c, Vector3(3.5, 3.5, -9.0), 0.9, 16.0, TAU * 3.0))
+		launch(c, "right", 0.5, 14.0, TAU * 3.0))
 	tw.tween_property(tornado, "scale", Vector3.ZERO, 0.2)
 	tw.tween_callback(tornado.queue_free)
 	# hop back home
@@ -2432,7 +2718,7 @@ func attack_glove_punch(c: Actor) -> void:
 	tw.tween_callback(func():
 		impact(c, 20.0)
 		c.pivot.scale = Vector3(0.6, 1.25, 1)  # squished against the glove
-		launch(c, Vector3(0.6, 1.8, -12.0), 0.8, -10.0))
+		launch(c, "back", 0.5, -10.0))
 	# glove overshoots a little, then retracts on the spring
 	tw.tween_method(func(k: float): set_glove.call(face.lerp(face + (face - hand).normalized() * 0.3, k)), 0.0, 1.0, 0.1)
 	tw.tween_interval(0.15)
@@ -2461,16 +2747,11 @@ func attack_giant_slap(c: Actor) -> void:
 	tw.parallel().tween_property(hand, "rotation:z", -0.55, 0.09)
 	tw.parallel().tween_property(cashier.body, "rotation:z", 0.35, 0.09)
 	tw.tween_callback(func():
-		impact(c, 15.0)
-		var spin := create_tween()
-		# spin like a top while sliding left...
-		spin.tween_property(c.body, "rotation:y", TAU * 5.0, 0.7).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_OUT)
-		spin.parallel().tween_property(c.pivot, "position", p + Vector3(-1.2, 0, -0.4), 0.7)
-		# ...then keel over and slide off
-		spin.tween_property(c.pivot, "rotation:z", 1.45, 0.18).set_trans(Tween.TRANS_BOUNCE).set_ease(Tween.EASE_OUT)
-		spin.tween_property(c.pivot, "position", p + Vector3(-3.5, 0, -1.6), 0.45)
-		spin.parallel().tween_property(c.pivot, "scale", Vector3.ZERO, 0.45)
-		spin.tween_callback(free_actor.bind(c)))
+		impact(c, 26.0)
+		hitstop(0.14)
+		c.pivot.scale = Vector3(0.55, 1.3, 1)  # squished by the hand
+		# slapped clean across the room into the left wall, spinning like a top
+		launch(c, "left", 0.5, -7.0, TAU * 5.0))
 	# follow-through and fade out
 	tw.tween_property(hand, "position", p + Vector3(-1.4, c.height * 0.45, 0.35), 0.18).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
 	tw.parallel().tween_property(hand, "rotation:z", -0.95, 0.18)
@@ -2619,6 +2900,14 @@ func save_highscore() -> void:
 # ---------------------------------------------------------------- loop & input
 
 func _process(delta: float) -> void:
+	var now := Time.get_ticks_usec()
+	if perf_last > 0:
+		var ms := (now - perf_last) / 1000.0
+		perf_worst_ms = maxf(perf_worst_ms, ms)
+		perf_frames += 1
+		if ms > 20.0:
+			perf_slow_frames += 1
+	perf_last = now
 	t += delta
 	handle_input()
 	layout_queue()
@@ -2717,6 +3006,12 @@ func _process(delta: float) -> void:
 	if beat >= 0.0 and keys_mix > 0.01 and not is_over():
 		punch = exp(-(beat - floor(beat)) * 7.0) * keys_mix
 	camera.fov = BASE_FOV - BEAT_ZOOM_DEG * punch
+	update_chase(delta)
+	# The title and the 2D part of the cinematic cover the whole screen, so the
+	# 3D world behind them doesn't need to be drawn. (Kept on for the first second so the
+	# shaders are built while nothing can stutter visibly.)
+	var covered := state == State.TITLE or (state == State.CINEMA and not cine_3d)
+	get_viewport().disable_3d = covered and t > 1.0
 	camera.h_offset = rng.randf_range(-shake, shake) * 0.006 + tremble.x
 	camera.v_offset = rng.randf_range(-shake, shake) * 0.006 + tremble.y
 
@@ -2763,5 +3058,165 @@ func handle_input() -> void:
 			if dir >= 0:
 				pray_input(dir)
 		State.GAME_OVER:
-			if Input.is_key_pressed(KEY_R):  # shortcut; the HUD buttons handle mouse/Enter
+			if Input.is_key_pressed(KEY_R) and not scores.blocking():  # shortcut; the HUD buttons handle mouse/Enter
 				restart(false)
+
+
+# ---------------------------------------------------------------- performance & profiling
+
+func build_warm_rig() -> void:
+	# Effect materials (explosion, sparks, thrown burgers, glove ...) only exist while an effect
+	# plays. When the last one is freed the driver throws its shader away and has to rebuild it
+	# on the next hit - a 100-270 ms freeze every time. This invisible, sub-pixel rig in front
+	# of the camera uses one material of every effect type all the time, so the shaders are
+	# built once at startup (behind the cinematic) and never dropped.
+	var rig := Node3D.new()
+	rig.name = "WarmRig"
+	rig.position = Vector3(0, 0, -3)
+	rig.scale = Vector3.ONE * 0.0005
+	camera.add_child(rig)
+	var quad := QuadMesh.new()
+	var vertex_col := std_mat(Color.WHITE)
+	vertex_col.vertex_color_use_as_albedo = true
+	var mats: Array = [fx_mat(Color.WHITE, 3.0), fx_mat(Color.WHITE, 0.0), std_mat(Color.WHITE, 2.0), std_mat(Color.WHITE), vertex_col]
+	for m in mats:
+		fx_mesh(rig, quad, m)
+		# the same material drawn through particles is a different shader variant
+		var pm := QuadMesh.new()
+		pm.material = m
+		var p := CPUParticles3D.new()
+		p.mesh = pm
+		p.amount = 1
+		p.lifetime = 10.0
+		p.local_coords = true  # otherwise the particle stays behind in the world at full size
+		p.scale_amount_min = 0.0005
+		p.scale_amount_max = 0.0005
+		p.gravity = Vector3.ZERO
+		p.color = Color(1, 0.5, 0.2)
+		rig.add_child(p)
+	# sprites thrown through the room (burger, tray, glove, hand, winged burger)
+	var spr := Sprite3D.new()
+	spr.texture = burger_tex
+	spr.alpha_cut = SpriteBase3D.ALPHA_CUT_DISCARD
+	rig.add_child(spr)
+	# a dim light, so the "lit by an extra omni light" variants are ready for the explosion flash
+	var l := OmniLight3D.new()
+	l.omni_range = 0.5
+	l.light_energy = 0.01
+	rig.add_child(l)
+
+
+func _on_node_added(n: Node) -> void:
+	if n is MeshInstance3D or n is CPUParticles3D:
+		optimize_mesh.call_deferred(n)
+
+
+func optimize_mesh(n: Node) -> void:
+	# Godot's default spheres / cylinders have 64 segments (a sphere = 4224 triangles), which is
+	# far more than these shapes need on screen. Pick the segment count from the real world size,
+	# so big shapes stay perfectly round and tiny ones (bubbles, sparks, particles) get cheap.
+	if not is_instance_valid(n) or not n.is_inside_tree() or not is_ancestor_of(n):
+		return
+	var mesh: Mesh = n.mesh
+	if mesh == null or mesh.has_meta("opt"):
+		return
+	var sc: Vector3 = n.global_transform.basis.get_scale()
+	var k := maxf(sc.x, maxf(sc.y, sc.z))
+	var particle := n is CPUParticles3D
+	if particle:
+		k *= n.scale_amount_max
+	if mesh is SphereMesh:
+		var size: float = mesh.radius * k
+		var seg := 12 if size < 0.12 else (20 if size < 0.5 else (32 if size < 2.0 else 48))
+		if particle:
+			seg = 8 if size < 0.2 else 12
+		mesh.radial_segments = seg
+		mesh.rings = maxi(3, seg / 2)
+	elif mesh is CylinderMesh:
+		var size: float = maxf(mesh.top_radius, mesh.bottom_radius) * k
+		var seg := 10 if size < 0.1 else (16 if size < 0.5 else (28 if size < 2.0 else 48))
+		if particle:
+			seg = 8
+		mesh.radial_segments = seg
+		mesh.rings = 1
+	elif mesh is TorusMesh:
+		mesh.rings = 48
+		mesh.ring_segments = 8
+	else:
+		return
+	mesh.set_meta("opt", true)
+
+
+var perf_last := 0
+var perf_worst_ms := 0.0  # longest frame since the last perf_stats() call
+var perf_frames := 0
+var perf_slow_frames := 0  # frames over 20 ms since the last perf_stats() call
+
+
+func perf_stats() -> Dictionary:
+	# Debug: frame cost breakdown (used while optimising; call twice, the first call enables measuring).
+	var vp := get_viewport().get_viewport_rid()
+	RenderingServer.viewport_set_measure_render_time(vp, true)
+	var worst := perf_worst_ms
+	var frames := perf_frames
+	var slow := perf_slow_frames
+	perf_worst_ms = 0.0
+	perf_frames = 0
+	perf_slow_frames = 0
+	return {
+		"slow_frames": slow,
+		"worst_frame_ms": worst,
+		"frames": frames,
+		"fps": Performance.get_monitor(Performance.TIME_FPS),
+		"process_ms": Performance.get_monitor(Performance.TIME_PROCESS) * 1000.0,
+		"render_cpu_ms": RenderingServer.viewport_get_measured_render_time_cpu(vp) + RenderingServer.get_frame_setup_time_cpu(),
+		"render_gpu_ms": RenderingServer.viewport_get_measured_render_time_gpu(vp),
+		"draw_calls": Performance.get_monitor(Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME),
+		"objects": Performance.get_monitor(Performance.RENDER_TOTAL_OBJECTS_IN_FRAME),
+		"primitives": Performance.get_monitor(Performance.RENDER_TOTAL_PRIMITIVES_IN_FRAME),
+		"nodes": Performance.get_monitor(Performance.OBJECT_NODE_COUNT),
+		"video_mem_mb": Performance.get_monitor(Performance.RENDER_VIDEO_MEM_USED) / 1048576.0,
+		"size": get_viewport().get_visible_rect().size,
+		"window": DisplayServer.window_get_size(),
+		"vsync": DisplayServer.window_get_vsync_mode(),
+	}
+
+
+func perf_meshes() -> Array:
+	# Debug: the biggest triangle contributors in the scene, grouped by mesh type + parent function.
+	var groups := {}
+	var stack: Array = [self]
+	while not stack.is_empty():
+		var n: Node = stack.pop_back()
+		stack.append_array(n.get_children())
+		var mesh: Mesh = null
+		var mult := 1
+		if n is MeshInstance3D:
+			mesh = n.mesh
+		elif n is CPUParticles3D:
+			mesh = n.mesh
+			mult = n.amount
+		elif n is MultiMeshInstance3D and n.multimesh:
+			mesh = n.multimesh.mesh
+			mult = n.multimesh.instance_count
+		if mesh == null:
+			continue
+		var tris := 0
+		for si in mesh.get_surface_count():
+			var arr := mesh.surface_get_arrays(si)
+			var idx = arr[Mesh.ARRAY_INDEX]
+			tris += (idx.size() if idx != null and idx.size() > 0 else arr[Mesh.ARRAY_VERTEX].size()) / 3
+		var key := "%s/%s%s" % [n.get_class(), mesh.get_class(), "" if n.visible else " (hidden)"]
+		if not groups.has(key):
+			groups[key] = {"key": key, "count": 0, "tris": 0, "max_one": 0}
+		groups[key]["count"] += 1
+		groups[key]["tris"] += tris * mult
+		groups[key]["max_one"] = maxi(groups[key]["max_one"], tris * mult)
+	var out: Array = groups.values()
+	out.sort_custom(func(a, b): return a["tris"] > b["tris"])
+	return out
+
+
+func perf_uncap(on: bool) -> void:
+	# Debug: turn vsync off to see the real frame cost as an uncapped FPS number.
+	DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_DISABLED if on else DisplayServer.VSYNC_ENABLED)

@@ -197,8 +197,10 @@ func start_dance() -> void:
 	# 30 s cutscene, unskippable: input is ignored until it ends, then the pause menu returns.
 	page = Page.DANCE
 	pressed_btn = null
+	get_viewport().disable_3d = true  # the dance covers the whole screen: skip drawing the 3D world
 	var d := DanceScene.new()
 	d.finished.connect(func():
+		get_viewport().disable_3d = false
 		d.queue_free()
 		page = Page.PAUSE
 		selected = 0

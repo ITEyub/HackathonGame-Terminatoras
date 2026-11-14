@@ -58,7 +58,10 @@ func _process(delta: float) -> void:
 	W = s.x
 	H = s.y
 	if game != null and game.state == S_GAME_OVER:
-		update_buttons(delta)
+		if game.scores.blocking():
+			mouse_was_down = true  # name entry is open: ignore clicks and Enter meant for it
+		else:
+			update_buttons(delta)
 	queue_redraw()
 
 
@@ -509,10 +512,11 @@ func star_rating(score: int) -> int:
 func draw_game_over() -> void:
 	var g = game
 	draw_underwater_bg(0.9)
-	var ww := minf(W * 0.62, 720.0)
+	# sits left of the highscore table (scores.gd)
+	var ww: float = g.scores.gameover_width()
 	var wh := minf(H * 0.86, 540.0)
 	var bob := sin(g.t * 1.8) * 3.0
-	var win := Rect2(W / 2 - ww / 2, H / 2 - wh / 2 + bob, ww, wh)
+	var win := Rect2(g.scores.gameover_center_x() - ww / 2, H / 2 - wh / 2 + bob, ww, wh)
 	Toon.glass_panel(self, win, Color(0.06, 0.2, 0.42, 0.88), 34.0)
 	# headline ribbon
 	var rib := Rect2(win.position.x + 40, win.position.y - 26, ww - 80, 78)
