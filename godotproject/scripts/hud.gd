@@ -114,6 +114,8 @@ func _draw() -> void:
 	match st:
 		S_CINEMA:
 			Cine.draw(self, font, g, W, H)
+			if g.cine_skip >= 0.0:
+				draw_rect(Rect2(0, 0, W, H), Color(0, 0, 0, clampf(g.cine_skip / g.CINE_SKIP_FADE, 0.0, 1.0)))
 			return
 		S_TITLE:
 			draw_title()

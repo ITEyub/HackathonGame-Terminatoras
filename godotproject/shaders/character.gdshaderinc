@@ -21,7 +21,7 @@ void fragment() {
 	if (c.a < 0.5) {
 		discard;
 	}
-	vec2 px = 3.0 / vec2(textureSize(tex, 0));
+	vec2 px = vec2(3.0 / 320.0);  // rim width in UV space, same at every art resolution
 	float a = texture(tex, UV + vec2(px.x, 0.0)).a + texture(tex, UV - vec2(px.x, 0.0)).a
 			+ texture(tex, UV + vec2(0.0, px.y)).a + texture(tex, UV - vec2(0.0, px.y)).a;
 	float rim = 1.0 - a * 0.25;  // > 0 near the silhouette

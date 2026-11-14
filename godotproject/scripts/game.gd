@@ -18,6 +18,7 @@ class Actor extends RefCounted:
 
 const CharacterArt := preload("res://scripts/character_art.gd")
 const Hud := preload("res://scripts/hud.gd")
+const Menu := preload("res://scripts/menu.gd")
 const Animalese := preload("res://scripts/animalese.gd")
 const Cine := preload("res://scripts/cinematic.gd")
 const VALKYRIES := preload("res://assets/sounds/valkyries.mp3")
@@ -140,6 +141,8 @@ static var skip_cinematic := false  # "Menu" from game over goes straight to the
 var state: State = State.TITLE
 var black_alpha := 0.0
 var cine_t := 0.0
+var cine_skip := -1.0  # >= 0 while the skip fade-to-black runs
+const CINE_SKIP_FADE := 0.6
 var cine_3d := false
 var cine_landed := false
 var cine_tex := {}
@@ -193,6 +196,7 @@ var boss: Actor
 var camera: Camera3D
 var cam_tween: Tween
 var hud: Node2D
+var menu: Node2D  # pause menu / options / title quit button (menu.gd)
 var burger_tex: Texture2D
 var tray_tex: Texture2D
 var winged_tex: Texture2D
@@ -288,6 +292,12 @@ func _ready() -> void:
 	hud = Hud.new()
 	hud.game = self
 	layer.add_child(hud)
+	var mlayer := CanvasLayer.new()
+	mlayer.layer = 5
+	add_child(mlayer)
+	menu = Menu.new()
+	menu.game = self
+	mlayer.add_child(menu)
 	voice = Animalese.new()
 	add_child(voice)
 	boss_voice = Animalese.new()
@@ -1054,13 +1064,19 @@ func build_town() -> void:
 
 # ---------------------------------------------------------------- 2D art in 3D
 
+# Character art resolution: 1 = classic 320 px textures (MIN / MID graphics), 3 = HQ (MAX).
+static var art_mult := 1
+
+
 func make_art(kind: String, data: Dictionary) -> SubViewport:
 	var vp := SubViewport.new()
-	vp.size = Vector2i(CharacterArt.ART_SIZE, CharacterArt.ART_SIZE)
+	vp.size = Vector2i.ONE * CharacterArt.ART_SIZE * art_mult
+	vp.add_to_group("art_viewport")
 	vp.transparent_bg = true
 	vp.disable_3d = true
 	vp.render_target_update_mode = SubViewport.UPDATE_ONCE
 	var art := CharacterArt.new()
+	art.scale = Vector2.ONE * art_mult
 	art.kind = kind
 	art.data = data
 	vp.add_child(art)
@@ -1070,6 +1086,24 @@ func make_art(kind: String, data: Dictionary) -> SubViewport:
 
 const SPRITE_DIR := "res://assets/sprites/%s.png"
 const BODY_NAMES := ["round", "tall", "wide"]
+
+
+func set_art_quality(hq: bool) -> void:
+	# Re-renders every procedural character/prop texture at the new resolution (live, from Options).
+	var m := 3 if hq else 1
+	if m == art_mult:
+		return
+	art_mult = m
+	for vp in get_tree().get_nodes_in_group("art_viewport"):
+		vp.size = Vector2i.ONE * CharacterArt.ART_SIZE * m
+		for c in vp.get_children():
+			c.scale = Vector2.ONE * m
+			c.queue_redraw()
+		vp.render_target_update_mode = SubViewport.UPDATE_ONCE
+	for s in get_tree().get_nodes_in_group("art_sprite"):
+		var tex: Texture2D = s.texture
+		if tex != null and tex.get_width() > 0:
+			s.pixel_size = s.get_meta("px_base") / float(tex.get_width())
 
 
 func override_name(kind: String, data: Dictionary) -> String:
@@ -1100,6 +1134,8 @@ func make_sprite(kind: String, data: Dictionary, one_sided := false) -> Sprite3D
 	var s := Sprite3D.new()
 	s.texture = tex
 	# Custom PNGs may be any resolution as long as they keep the exported canvas layout.
+	s.set_meta("px_base", PIXEL * CharacterArt.ART_SIZE)
+	s.add_to_group("art_sprite")
 	s.pixel_size = PIXEL * CharacterArt.ART_SIZE / float(tex.get_width())
 	s.alpha_cut = SpriteBase3D.ALPHA_CUT_DISCARD
 	s.double_sided = not one_sided
@@ -1220,6 +1256,8 @@ func chest(a: Actor) -> Vector3:
 func flying_sprite(tex: Texture2D, from: Vector3, size := 1.0) -> Sprite3D:
 	var s := Sprite3D.new()
 	s.texture = tex
+	s.set_meta("px_base", PIXEL * 0.5 * size * CharacterArt.ART_SIZE)
+	s.add_to_group("art_sprite")
 	s.pixel_size = PIXEL * 0.5 * size * CharacterArt.ART_SIZE / float(tex.get_width())
 	s.alpha_cut = SpriteBase3D.ALPHA_CUT_DISCARD
 	add_child(s)
@@ -1253,7 +1291,7 @@ func start_blackout() -> void:
 		vt.tween_property(valk_player, "volume_db", -60.0, 1.0)
 		vt.tween_callback(valk_player.stop)
 	black_alpha = 1.0
-	get_tree().create_timer(1.0).timeout.connect(start_intro)
+	get_tree().create_timer(1.0, false).timeout.connect(start_intro)
 
 
 func cam_q(pos: Vector3, target: Vector3) -> Quaternion:
@@ -1282,7 +1320,7 @@ func skip_intro() -> void:
 	black_alpha = 0.0
 	shot_overview(0.5)
 	state = State.RESOLVING
-	get_tree().create_timer(0.5).timeout.connect(start_countdown)
+	get_tree().create_timer(0.5, false).timeout.connect(start_countdown)
 
 
 func start_countdown() -> void:
@@ -1828,7 +1866,7 @@ func cine_land() -> void:
 	puff.position = PARA_LAND + Vector3(0, 0.1, 0)
 	add_child(puff)
 	puff.emitting = true
-	get_tree().create_timer(1.5).timeout.connect(puff.queue_free)
+	get_tree().create_timer(1.5, false).timeout.connect(puff.queue_free)
 	# then he unclips and waddles straight past the queue into the shop
 	tw.tween_interval(0.5)
 	tw.tween_property(pv, "position", DOOR_POS + Vector3(-0.35, 0, -0.2), 1.2)
@@ -1886,7 +1924,7 @@ func take_current() -> Actor:
 
 
 func schedule_next(delay: float) -> void:
-	get_tree().create_timer(delay).timeout.connect(next_customer)
+	get_tree().create_timer(delay, false).timeout.connect(next_customer)
 
 
 func next_customer() -> void:
@@ -2019,7 +2057,7 @@ func flip_success() -> void:
 	var c := queue[0]
 	shot_overview(0.35)
 	throw(burger_tex, GRILL_POS + Vector3(0, 1.1, 0), chest(c), 0.55)
-	get_tree().create_timer(0.55).timeout.connect(serve_delivered)
+	get_tree().create_timer(0.55, false).timeout.connect(serve_delivered)
 
 
 func flip_fail(reason: String) -> void:
@@ -2283,7 +2321,7 @@ func impact_burst(pos: Vector3) -> void:
 	sparks.position = pos
 	add_child(sparks)
 	sparks.emitting = true
-	get_tree().create_timer(1.0).timeout.connect(sparks.queue_free)
+	get_tree().create_timer(1.0, false).timeout.connect(sparks.queue_free)
 
 
 func launch(c: Actor, offset: Vector3, dur: float, spin_z: float, spin_y := 0.0) -> Tween:
@@ -2587,6 +2625,11 @@ func _process(delta: float) -> void:
 	match state:
 		State.CINEMA:
 			update_cinematic(delta)
+			if cine_skip >= 0.0 and state == State.CINEMA:
+				cine_skip += delta
+				if cine_skip >= CINE_SKIP_FADE:
+					cine_skip = -1.0
+					end_cinematic()
 		State.TITLE:
 			title_t += delta
 		State.COUNTDOWN:
@@ -2596,8 +2639,12 @@ func _process(delta: float) -> void:
 				countdown_t = 0.0
 				play_hit()
 			elif countdown_n == 0 and countdown_t >= 0.7:
-				add_popup("Serve the nice ones, deal with the mean ones!", Vector2(0, 170), Color(1, 1, 0.6), 30, 2.0, 0.0)
-				begin_customer()
+				if menu.tutorial_pending():
+					# first time playing: explain the rules, the round starts when it closes
+					menu.open_tutorial(begin_customer)
+				else:
+					add_popup("Serve the nice ones, deal with the mean ones!", Vector2(0, 170), Color(1, 1, 0.6), 30, 2.0, 0.0)
+					begin_customer()
 		State.TALK:
 			talk_left -= delta
 			if talk_left <= 0.0 and not voice.speaking:
@@ -2689,10 +2736,11 @@ func handle_input() -> void:
 	prev_any = any_now
 	match state:
 		State.CINEMA:
-			if any_just and cine_t > 0.5:
-				end_cinematic()
+			if any_just and cine_t > 0.5 and cine_skip < 0.0:
+				cine_skip = 0.0  # fade to black, then the title fades in
+				voice.stop()
 		State.TITLE:
-			if any_just and title_t > 0.4:
+			if any_just and title_t > 0.4 and not menu.title_quit_hovered():
 				start_blackout()
 		State.INTRO:
 			if any_just:
