@@ -164,7 +164,7 @@ func begin() -> void:
 	phase_t = 0.0
 	if my_score > 0:
 		phase = Phase.NAME
-		name_text = last_name
+		name_text = ""  # always start with an empty field
 		error_text = ""
 	else:
 		show_board()
