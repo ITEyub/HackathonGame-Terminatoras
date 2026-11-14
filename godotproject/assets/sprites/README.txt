@@ -1,7 +1,7 @@
 Custom sprites
 ==============
 Drop PNGs here to replace the built-in drawn art. Use the exported templates in
-/Users/nicolas/Desktop/gamejam/sprites_export as your starting canvas:
+the sprites_export folder next to the project as your starting canvas:
 
 - Keep the same canvas size (or any size with the same proportions / layout).
 - Keep the feet on the same spot (bottom centre) so characters stand on the floor.

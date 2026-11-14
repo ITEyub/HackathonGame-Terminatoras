@@ -4,7 +4,7 @@ extends Node
 ## Put edited PNGs (same names, same canvas size) into res://assets/sprites/ and the game uses them.
 
 const CharacterArt := preload("res://scripts/character_art.gd")
-const OUT_DIR := "/Users/nicolas/Desktop/gamejam/sprites_export"
+var OUT_DIR := ProjectSettings.globalize_path("res://").path_join("../sprites_export").simplify_path()  # folder next to godotproject/
 const SCALE := 2
 const BODIES := ["round", "tall", "wide"]
 
