@@ -60,6 +60,13 @@ static func vgrad(ci: CanvasItem, pts: PackedVector2Array, top: Color, bot: Colo
 	for p in pts:
 		y0 = minf(y0, p.y)
 		y1 = maxf(y1, p.y)
+	var x0 := INF
+	var x1 := -INF
+	for p in pts:
+		x0 = minf(x0, p.x)
+		x1 = maxf(x1, p.x)
+	if x1 - x0 < 3.0 or y1 - y0 < 3.0:
+		return  # sub-pixel shape (e.g. highlight on a tiny orb): invisible and can't be triangulated
 	var cols := PackedColorArray()
 	for p in pts:
 		cols.append(top.lerp(bot, (p.y - y0) / maxf(1.0, y1 - y0)))

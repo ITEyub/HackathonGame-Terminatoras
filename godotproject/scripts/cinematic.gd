@@ -106,7 +106,7 @@ static func draw(ci: CanvasItem, font: Font, g, W: float, H: float) -> void:
 	if white > 0.0:
 		ci.draw_rect(Rect2(0, 0, W, H), Color(1, 1, 0.95, white))
 	if t > 3.0 and t < T_END - 1.0:
-		Toon.toon_text(ci, font, Vector2(0, H - 14), "Press any key to skip", 14, Color(1, 1, 1, 0.35), HORIZONTAL_ALIGNMENT_RIGHT, W - 18, 3, false)
+		Toon.toon_text(ci, font, Vector2(0, H - 14), "Press C or S to skip", 14, Color(1, 1, 1, 0.35), HORIZONTAL_ALIGNMENT_RIGHT, W - 18, 3, false)
 
 
 # ---------------------------------------------------------------- framing
@@ -324,51 +324,54 @@ static func shot_closeup(ci: CanvasItem, font: Font, W: float, H: float, lt: flo
 
 
 static func props(ci: CanvasItem, who: String, pt: Callable, f: float, t: float) -> void:
-	# Costume props drawn over the fish art (coordinates are in 320px art space).
+	# Costume props drawn over the crew sprites (coordinates are in 320px art space, measured on
+	# customer_round_front_3 / customer_tall_front_3 / customer_wide_front_1 / cashier_front).
 	match who:
 		"commander":
-			# wide-brim cavalry hat with gold cord
-			Toon.vgrad(ci, ellipse(pt.call(160, 150), 78 * f, 15 * f), Color(0.15, 0.12, 0.07), Color(0.08, 0.06, 0.03))
-			ci.draw_colored_polygon(PackedVector2Array([pt.call(118, 150), pt.call(202, 150), pt.call(192, 104), pt.call(160, 112), pt.call(128, 104)]), Color(0.16, 0.13, 0.08))
-			ci.draw_line(pt.call(120, 142), pt.call(200, 142), Color(0.95, 0.75, 0.2), 5 * f)
-			ci.draw_line(pt.call(150, 120), pt.call(170, 136), Color(0.95, 0.75, 0.2), 3 * f)
-			ci.draw_line(pt.call(170, 120), pt.call(150, 136), Color(0.95, 0.75, 0.2), 3 * f)
+			# wide-brim cavalry hat with gold cord, sitting over his sweatband
+			Toon.vgrad(ci, ellipse(pt.call(162, 184), 84 * f, 16 * f), Color(0.15, 0.12, 0.07), Color(0.08, 0.06, 0.03))
+			ci.draw_colored_polygon(PackedVector2Array([pt.call(118, 184), pt.call(206, 184), pt.call(196, 136), pt.call(162, 146), pt.call(128, 136)]), Color(0.16, 0.13, 0.08))
+			ci.draw_line(pt.call(120, 175), pt.call(204, 175), Color(0.95, 0.75, 0.2), 5 * f)
+			ci.draw_line(pt.call(152, 152), pt.call(172, 168), Color(0.95, 0.75, 0.2), 3 * f)
+			ci.draw_line(pt.call(172, 152), pt.call(152, 168), Color(0.95, 0.75, 0.2), 3 * f)
 			# aviator sunglasses reflecting the sunset
-			for ex in [138.0, 182.0]:
-				var lens := ellipse(pt.call(ex, 191), 21 * f, 16 * f)
+			for ex in [140.0, 180.0]:
+				var lens := ellipse(pt.call(ex, 211), 19 * f, 14 * f)
 				Toon.vgrad(ci, lens, Color(0.95, 0.55, 0.2), Color(0.08, 0.04, 0.06))
 				Toon.outline(ci, lens, Color(0.9, 0.75, 0.3), 2.5 * f)
-			ci.draw_line(pt.call(158, 186), pt.call(162, 186), Color(0.9, 0.75, 0.3), 3 * f)
-			# megaphone pointed out of the door, blaring
-			ci.draw_colored_polygon(PackedVector2Array([pt.call(128, 222), pt.call(128, 244), pt.call(48, 272), pt.call(48, 194)]), Color(0.75, 0.75, 0.7))
-			ci.draw_colored_polygon(ellipse(pt.call(48, 233), 10 * f, 39 * f), Color(0.3, 0.3, 0.32))
+			ci.draw_line(pt.call(158, 207), pt.call(162, 207), Color(0.9, 0.75, 0.3), 3 * f)
+			# megaphone at his mouth, pointed out of the door, blaring
+			ci.draw_colored_polygon(PackedVector2Array([pt.call(146, 230), pt.call(146, 252), pt.call(62, 282), pt.call(62, 200)]), Color(0.75, 0.75, 0.7))
+			ci.draw_colored_polygon(ellipse(pt.call(62, 241), 10 * f, 41 * f), Color(0.3, 0.3, 0.32))
 			for k in 3:
 				var rr := (30.0 + k * 26.0 + fmod(t * 120.0, 26.0)) * f
-				ci.draw_arc(pt.call(40, 233), rr, PI * 0.75, PI * 1.25, 12, Color(1, 0.9, 0.7, 0.6 - k * 0.18), 4 * f)
+				ci.draw_arc(pt.call(54, 241), rr, PI * 0.75, PI * 1.25, 12, Color(1, 0.9, 0.7, 0.6 - k * 0.18), 4 * f)
 		"surfer":
-			ci.draw_line(pt.call(128, 116), pt.call(192, 116), Color(0.9, 0.15, 0.2), 9 * f)
-			ci.draw_line(pt.call(192, 116), pt.call(212, 128 + sin(t * 20.0) * 6.0), Color(0.9, 0.15, 0.2), 6 * f)
+			# red bandana under the cap, tails flapping in the wind
+			ci.draw_line(pt.call(124, 137), pt.call(198, 137), Color(0.9, 0.15, 0.2), 8 * f)
+			ci.draw_line(pt.call(198, 137), pt.call(220, 146 + sin(t * 20.0) * 6.0), Color(0.9, 0.15, 0.2), 6 * f)
+			ci.draw_line(pt.call(198, 139), pt.call(216, 156 + sin(t * 23.0 + 1.0) * 6.0), Color(0.8, 0.1, 0.15), 5 * f)
 		"soldier":
-			# oversized helmet with netting and a dangling strap
-			Toon.vgrad(ci, half_dome(pt.call(160, 186), 70 * f, 46 * f), Color(0.36, 0.42, 0.22), Color(0.2, 0.24, 0.12))
-			for k in 5:
-				ci.draw_line(pt.call(106 + k * 27, 150), pt.call(118 + k * 22, 184), Color(0.12, 0.14, 0.06), 2 * f)
-			ci.draw_line(pt.call(96, 186), pt.call(224, 186), Color(0.14, 0.16, 0.08), 6 * f)
-			ci.draw_line(pt.call(104, 188), pt.call(118, 248), Color(0.25, 0.2, 0.1), 3 * f)
+			# oversized army helmet jammed over his straw hat, netting and a dangling strap
+			Toon.vgrad(ci, half_dome(pt.call(160, 196), 82 * f, 54 * f), Color(0.36, 0.42, 0.22), Color(0.2, 0.24, 0.12))
+			for k in 6:
+				ci.draw_line(pt.call(96 + k * 26, 152), pt.call(106 + k * 22, 194), Color(0.12, 0.14, 0.06), 2 * f)
+			ci.draw_line(pt.call(76, 196), pt.call(244, 196), Color(0.14, 0.16, 0.08), 7 * f)
+			ci.draw_line(pt.call(88, 198), pt.call(102, 256), Color(0.25, 0.2, 0.1), 3 * f)
 			# nervous sweat
 			for k in 2:
-				var sy := 170.0 + fmod(t * 60.0 + k * 30.0, 50.0)
-				ci.draw_colored_polygon(ellipse(pt.call(232 + k * 10, sy), 4 * f, 7 * f), Color(0.7, 0.9, 1.0, 0.85))
+				var sy := 196.0 + fmod(t * 60.0 + k * 30.0, 50.0)
+				ci.draw_colored_polygon(ellipse(pt.call(236 + k * 10, sy), 4 * f, 7 * f), Color(0.7, 0.9, 1.0, 0.85))
 		"cashier":
-			# flight goggles on the cap and parachute harness straps
-			ci.draw_line(pt.call(112, 150), pt.call(208, 150), Color(0.2, 0.15, 0.1), 7 * f)
+			# flight goggles pushed up under the cap and parachute harness straps
+			ci.draw_line(pt.call(112, 146), pt.call(208, 146), Color(0.2, 0.15, 0.1), 7 * f)
 			for gx in [142.0, 178.0]:
-				ci.draw_circle(pt.call(gx, 146), 15 * f, Color(0.25, 0.2, 0.15))
-				ci.draw_circle(pt.call(gx, 146), 11 * f, Color(1.0, 0.7, 0.4, 0.85))
-				ci.draw_circle(pt.call(gx - 4, 142), 3.5 * f, Color(1, 1, 0.9))
-			ci.draw_line(pt.call(112, 172), pt.call(150, 270), Color(0.25, 0.3, 0.15), 9 * f)
-			ci.draw_line(pt.call(208, 172), pt.call(170, 270), Color(0.25, 0.3, 0.15), 9 * f)
-			ci.draw_rect(Rect2(pt.call(150, 236), Vector2(20, 16) * f), Color(0.7, 0.7, 0.72))
+				ci.draw_circle(pt.call(gx, 143), 14 * f, Color(0.25, 0.2, 0.15))
+				ci.draw_circle(pt.call(gx, 143), 10 * f, Color(1.0, 0.7, 0.4, 0.85))
+				ci.draw_circle(pt.call(gx - 4, 139), 3.5 * f, Color(1, 1, 0.9))
+			ci.draw_line(pt.call(112, 176), pt.call(146, 262), Color(0.25, 0.3, 0.15), 9 * f)
+			ci.draw_line(pt.call(208, 176), pt.call(174, 262), Color(0.25, 0.3, 0.15), 9 * f)
+			ci.draw_rect(Rect2(pt.call(150, 244), Vector2(20, 16) * f), Color(0.7, 0.7, 0.72))
 
 
 static func half_dome(c: Vector2, rx: float, ry: float) -> PackedVector2Array:
@@ -404,11 +407,19 @@ static func shot_jump(ci: CanvasItem, W: float, H: float, lt: float) -> void:
 			ci.draw_colored_polygon(half_dome(cc, cw, 28.0 * open), SILHOUETTE)
 			for sx in [-1.0, -0.4, 0.4, 1.0]:
 				ci.draw_line(cc + Vector2(cw * sx, 0), p + Vector2(0, -8), Color(SILHOUETTE, 0.9), 1.4)
-		# little spiky fish silhouette
-		ci.draw_circle(p, 9.0, SILHOUETTE)
-		for i in 8:
-			var a := TAU * i / 8.0 + k
-			ci.draw_line(p + Vector2(cos(a), sin(a)) * 8.0, p + Vector2(cos(a), sin(a)) * 13.0, SILHOUETTE, 2.0)
+		# the squid cashier's silhouette: long head with side fins, cap, dangling tentacles
+		var sway := sin(k * 3.0) * 0.15
+		ci.draw_set_transform(p + Vector2(0, 12), sway, Vector2.ONE * 1.9)
+		ci.draw_colored_polygon(ellipse(Vector2(0, -2), 6.5, 11.0), SILHOUETTE)
+		ci.draw_colored_polygon(PackedVector2Array([Vector2(-5, -8), Vector2(-11, -10), Vector2(-5, -2)]), SILHOUETTE)
+		ci.draw_colored_polygon(PackedVector2Array([Vector2(5, -8), Vector2(11, -10), Vector2(5, -2)]), SILHOUETTE)
+		ci.draw_colored_polygon(half_dome(Vector2(0, -12), 5.5, 4.0), SILHOUETTE)  # cap
+		ci.draw_line(Vector2(0, -13), Vector2(7, -12), SILHOUETTE, 1.6)  # cap brim
+		for i in 4:  # tentacles flapping in the wind
+			var x0 := -3.6 + i * 2.4
+			var wig := sin(k * 9.0 + i * 1.3) * 2.0
+			ci.draw_polyline(PackedVector2Array([Vector2(x0, 7), Vector2(x0 + wig, 12), Vector2(x0 - wig * 0.6, 16)]), SILHOUETTE, 1.8)
+		ci.draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 	dust(ci, W, H, 20.0 + lt)
 
 

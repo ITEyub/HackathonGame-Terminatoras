@@ -24,7 +24,10 @@ func _ready() -> void:
 	player.volume_db = -3.0
 	add_child(player)
 	for c in LETTERS:
-		streams[c] = load(CLIP_PATH % c)
+		var path := CLIP_PATH % c
+		if not ResourceLoader.exists(path):
+			path = path.get_basename() + ".wav"  # a few clips are WAV files
+		streams[c] = load(path)
 
 
 func speak(t: String, base_pitch: float, letter_time := 0.045) -> void:

@@ -23,6 +23,7 @@ const Scores := preload("res://scripts/scores.gd")
 const Animalese := preload("res://scripts/animalese.gd")
 const Cine := preload("res://scripts/cinematic.gd")
 const VALKYRIES := preload("res://assets/sounds/valkyries.mp3")
+const EXPLOSION_SOUND := preload("res://assets/sounds/explosion.mp3")
 const PARA_START := Vector3(1.6, 15.0, -16.5)
 const PARA_LAND := Vector3(2.6, 0.0, -14.6)   # beside the line in front of the door
 const COUNTDOWN_HIT := preload("res://assets/sounds/philly_hit.ogg")
@@ -36,7 +37,7 @@ const CROWD_SOUND := preload("res://assets/sounds/crowd.mp3")
 const PUNCH_SOUND := preload("res://assets/sounds/punch.mp3")
 const CROWD_NEAR := 2.5    # metres: full volume this close to the nearest customer
 const CROWD_FAR := 22.0    # metres: silent from this far away
-const MUSIC_DB := -5.0
+const MUSIC_DB := -1.0
 const MUSIC_DUCK_DB := -24.0  # soundtrack level while the holy burger floats
 # Adaptive soundtrack: stems in the order they join (bass always plays).
 const MUSIC_STEMS := ["res://assets/music/bass.wav", "res://assets/music/drums.wav", "res://assets/music/mullet.wav", "res://assets/music/keys.wav"]
@@ -238,6 +239,30 @@ var t := 0.0
 var attack_seq: Array[int] = []
 var attack_idx := 0
 var attack_left := 0.0
+# attack minigame variants: "combo" (arrow sequence), "rage" (mash space), "quiz" (quiz show)
+var attack_mode := "combo"
+var attack_time := ATTACK_TIME
+var last_attack_mode := ""
+var rage := 0.0        # 0..1
+var rage_need := 20    # presses for a full bar
+var rage_drain := 0.2  # bar lost per second
+var rage_steam: Array[CPUParticles3D] = []
+# power-up: golden aura, rising energy, floating rocks, light and a charging hum
+var aura_meshes: Array[MeshInstance3D] = []
+var aura_flames: CPUParticles3D
+var aura_rocks: CPUParticles3D
+var aura_light: OmniLight3D
+var charge_player: AudioStreamPlayer
+var power_flash := 0.0  # 1 -> 0 white flash when the bar is full
+var quiz := {}         # {q, answers: [4], correct}
+var quiz_pick := -1    # -1 nothing yet, 0..3 chosen, -2 ran out of time
+var quiz_t := 0.0      # time since the pick
+var quiz_revealed := false
+var quiz_used: Array[int] = []
+var quiz_music: AudioStreamPlayer
+var quiz_fx: AudioStreamPlayer
+var quiz_sting := {}
+var mash_player: AudioStreamPlayer
 # flip burgers
 var patties: Array = []  # {mesh, mat, cook, speed, flipped}
 # dance
@@ -257,6 +282,16 @@ var boss_slide := 0.0
 var boss_tween: Tween
 
 var rng := RandomNumberGenerator.new()
+# restaurant life: guests at the tables, the slot machine's reels and lights
+var diners: Array[Actor] = []
+var slot_reels: Array[Label3D] = []
+var slot_lights: Array[MeshInstance3D] = []
+var slot_spin_t := 2.0  # countdown to the next spin
+var slot_spinning := 0.0
+var open_sign: Label3D
+const DECOR_FONT := preload("res://assets/fonts/Fredoka.ttf")
+const TABLES := [Vector3(-3.6, 0, -3.5), Vector3(-3.6, 0, -7.0), Vector3(-3.6, 0, -10.0)]
+const SLOT_SYMBOLS := ["7", "$", "*", "B", "#"]
 
 
 func _ready() -> void:
@@ -271,13 +306,14 @@ func _ready() -> void:
 	hand_tex = art_texture("hand", {})[0]
 	build_warm_rig()
 	boom_player = AudioStreamPlayer.new()  # generated up front: building it mid-game costs a frame
-	boom_player.stream = make_boom()
-	boom_player.volume_db = -3.0
+	boom_player.stream = EXPLOSION_SOUND
+	boom_player.volume_db = 4.0
 	add_child(boom_player)
 	Engine.time_scale = 1.0
 	cashier = make_actor("cashier", {}, "cashier_front")
 	cashier.pivot.position = CASHIER_POS
 	cashier.height = 1.75
+	setup_attack_variants()
 	boss = make_actor("boss", {})
 	boss.height = 2.0
 	boss.pivot.visible = false
@@ -289,6 +325,7 @@ func _ready() -> void:
 	for i in QUEUE_TOTAL:
 		queue.append(make_actor("customer", make_customer_data(), "customer_back"))
 	layout_queue()
+	spawn_diners()
 	var vlayer := CanvasLayer.new()
 	vlayer.layer = 1
 	add_child(vlayer)
@@ -324,6 +361,10 @@ func _ready() -> void:
 	menu = Menu.new()
 	menu.game = self
 	mlayer.add_child(menu)
+	if OS.get_cmdline_user_args().has("bench"):  # automatic performance run, see bench.gd
+		var bench: Node = load("res://scripts/bench.gd").new()
+		bench.game = self
+		add_child(bench)
 	voice = Animalese.new()
 	add_child(voice)
 	boss_voice = Animalese.new()
@@ -568,17 +609,7 @@ func build_world() -> void:
 	box(Vector3(5.6, 1.6, 0.15), Vector3(-2.0, 3.6, -12.3), Color(0.03, 0.1, 0.28))
 	store_logo(Vector3(-2.0, 3.6, -12.2), 5.2, false)
 
-	# Portholes on both side walls
-	for side in [-1.0, 1.0]:
-		for z in [-3.0, -6.5, -10.0]:
-			var x: float = side * 5.86
-			cylinder(0.5, 0.08, Vector3(x, 2.6, z), Color(0.55, 0.45, 0.3), Vector3(0, 0, 90))
-			cylinder(0.38, 0.1, Vector3(x - side * 0.02, 2.6, z), Color(0.45, 0.78, 0.9), Vector3(0, 0, 90), 0.8)
 
-	# Tables on the left for depth
-	for z in [-3.5, -7.0, -10.0]:
-		cylinder(0.6, 0.06, Vector3(-3.6, 0.75, z), Color(1.0, 0.3, 0.35))
-		cylinder(0.07, 0.75, Vector3(-3.6, 0.375, z), Color(0.4, 0.4, 0.45))
 
 	# Counter + register
 	box(Vector3(2.6, 0.62, 0.7), Vector3(-0.3, 0.31, 0), Color(1.0, 0.42, 0.15))
@@ -608,6 +639,8 @@ func build_world() -> void:
 		pm2.position = GRILL_POS + Vector3(-0.45 + k * 0.45, 0.92, 0)
 		add_child(pm2)
 		patties.append({"mesh": pm2, "mat": m, "cook": 0.0, "speed": 0.4, "flipped": false})
+
+	build_decor()
 
 	# Rising bubbles
 	var bubbles := CPUParticles3D.new()
@@ -686,6 +719,284 @@ func build_outside() -> void:
 	for x in [-6.0, 6.0]:
 		box(Vector3(0.5, 5.2, 0.5), Vector3(x, 2.6, -12.6), Color(1.0, 0.45, 0.1), 0.0, 0.2)
 	build_town()
+
+
+# ---------------------------------------------------------------- restaurant interior details
+
+func prop(m: MeshInstance3D) -> MeshInstance3D:
+	# small decoration: no shadow (cheaper, and keeps the floor lighting clean)
+	m.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	return m
+
+
+func wall_text(text_: String, pos: Vector3, yaw: float, col: Color, size := 64, outline := 12, outline_col := Color(0.05, 0.05, 0.12)) -> Label3D:
+	# Flat text on a wall. yaw 0 = readable from +Z, PI/2 = from +X, -PI/2 = from -X, PI = from -Z.
+	var l := Label3D.new()
+	l.text = text_
+	l.font = DECOR_FONT
+	l.font_size = size
+	l.pixel_size = 0.005
+	l.modulate = col
+	l.outline_size = outline
+	l.outline_modulate = outline_col
+	l.position = pos
+	l.rotation.y = yaw
+	l.double_sided = false
+	l.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	add_child(l)
+	return l
+
+
+func floor_marks(col: Color, marks: Array) -> void:
+	# Dirt / spills: flat translucent blobs just above the floor, one draw call per colour.
+	# marks: [[x, z, radius_x, radius_z, angle], ...]
+	var disc := CylinderMesh.new()
+	disc.top_radius = 1.0
+	disc.bottom_radius = 1.0
+	disc.height = 0.002
+	disc.radial_segments = 20
+	disc.rings = 1
+	var m := StandardMaterial3D.new()
+	m.albedo_color = col
+	m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	m.roughness = 0.25 if col.a > 0.5 else 1.0  # wet spills shine a little
+	disc.material = m
+	var mm := MultiMesh.new()
+	mm.transform_format = MultiMesh.TRANSFORM_3D
+	mm.mesh = disc
+	mm.instance_count = marks.size()
+	for i in marks.size():
+		var d: Array = marks[i]
+		var b := Basis(Vector3.UP, d[4]).scaled(Vector3(d[2], 1.0, d[3]))
+		mm.set_instance_transform(i, Transform3D(b, Vector3(d[0], 0.004 + i * 0.0003, d[1])))
+	var mmi := MultiMeshInstance3D.new()
+	mmi.multimesh = mm
+	mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	add_child(mmi)
+
+
+func build_decor() -> void:
+	var r := RandomNumberGenerator.new()
+	r.seed = 1234  # same room every time
+
+	# --- tables with condiments, napkins, drinks and a hanging lamp above each
+	for tp in TABLES:
+		var p: Vector3 = tp
+		cylinder(0.62, 0.07, p + Vector3(0, 0.78, 0), Color(1.0, 0.3, 0.35))
+		prop(cylinder(0.64, 0.02, p + Vector3(0, 0.745, 0), Color(0.95, 0.85, 0.3)))  # chrome-ish rim
+		cylinder(0.07, 0.75, p + Vector3(0, 0.375, 0), Color(0.4, 0.4, 0.45))
+		prop(cylinder(0.3, 0.04, p + Vector3(0, 0.02, 0), Color(0.35, 0.35, 0.4)))
+		prop(cylinder(0.035, 0.2, p + Vector3(0.18, 0.92, -0.12), Color(0.9, 0.1, 0.1)))   # ketchup
+		prop(cylinder(0.035, 0.2, p + Vector3(0.27, 0.92, -0.08), Color(1.0, 0.8, 0.1)))   # mustard
+		prop(box(Vector3(0.14, 0.12, 0.08), p + Vector3(-0.2, 0.88, -0.15), Color(0.85, 0.85, 0.9)))  # napkins
+		prop(box(Vector3(0.1, 0.03, 0.06), p + Vector3(-0.2, 0.955, -0.15), Color(1, 1, 1)))
+		# soda cup with straw
+		prop(cylinder(0.06, 0.18, p + Vector3(0.05, 0.91, 0.2), Color(0.2, 0.75, 0.95)))
+		prop(cylinder(0.012, 0.16, p + Vector3(0.07, 1.04, 0.2), Color(1, 0.3, 0.4), Vector3(0, 0, 12)))
+		# pendant lamp
+		prop(cylinder(0.012, 2.1, p + Vector3(0, 3.95, 0), Color(0.15, 0.15, 0.18)))
+		var shade := prop(cone(0.32, 0.08, 0.28, p + Vector3(0, 2.62, 0), Color(0.1, 0.55, 0.45)))
+		shade.material_override = std_mat(Color(0.1, 0.55, 0.45))
+		prop(sphere(0.1, p + Vector3(0, 2.6, 0), Color(1.0, 0.9, 0.6), 2.5))
+
+	# --- slot machine against the left wall, near the counter
+	var sm := Vector3(-5.45, 0, -1.25)
+	var yaw := PI / 2.0  # faces +X, into the room
+	box(Vector3(0.75, 1.15, 0.85), sm + Vector3(0, 0.575, 0), Color(0.75, 0.08, 0.12))
+	box(Vector3(0.6, 0.55, 0.8), sm + Vector3(0.02, 1.42, 0), Color(0.85, 0.12, 0.15)).rotation.z = -0.12
+	prop(box(Vector3(0.78, 0.08, 0.88), sm + Vector3(0, 1.17, 0), Color(1.0, 0.8, 0.15), 0.3))
+	prop(box(Vector3(0.62, 0.2, 0.86), sm + Vector3(0.0, 1.8, 0), Color(1.0, 0.75, 0.1), 0.6))  # light bar
+	prop(box(Vector3(0.05, 0.3, 0.62), sm + Vector3(0.36, 1.38, 0), Color(0.05, 0.05, 0.1)))  # reel window
+	for k in 3:
+		var z := -0.2 + k * 0.2
+		prop(box(Vector3(0.02, 0.24, 0.16), sm + Vector3(0.385, 1.38, z), Color(1, 1, 0.95), 0.5))
+		var reel := wall_text("7", sm + Vector3(0.4, 1.38, z), yaw, Color(0.85, 0.1, 0.1), 52, 8, Color(1, 1, 1))
+		slot_reels.append(reel)
+	wall_text("JACKPOT", sm + Vector3(0.43, 1.8, 0), yaw, Color(0.75, 0.05, 0.1), 40, 6, Color(1, 0.95, 0.6))
+	for k in 6:  # chasing lights around the top
+		var lt := prop(sphere(0.035, sm + Vector3(0.33, 1.95, -0.33 + k * 0.13), Color(1, 1, 0.7), 2.0))
+		lt.material_override = std_mat(Color(1, 1, 0.7), 2.0)
+		slot_lights.append(lt)
+	prop(box(Vector3(0.25, 0.06, 0.5), sm + Vector3(0.45, 0.85, 0), Color(0.15, 0.15, 0.18)))  # coin tray
+	prop(cylinder(0.03, 0.5, sm + Vector3(0.0, 1.5, 0.48), Color(0.75, 0.75, 0.8)))           # lever
+	prop(sphere(0.07, sm + Vector3(0.0, 1.78, 0.48), Color(0.95, 0.1, 0.15), 0.4))
+	# a stool in front of it
+	cylinder(0.2, 0.06, sm + Vector3(0.8, 0.62, 0), Color(0.9, 0.3, 0.3))
+	prop(cylinder(0.04, 0.6, sm + Vector3(0.8, 0.3, 0), Color(0.4, 0.4, 0.45)))
+
+	# --- restroom doors on the left wall (puns on the signs) + direction sign
+	for d in [[-8.3, "BUOYS", Color(0.3, 0.6, 1.0)], [-11.4, "GILLS", Color(1.0, 0.45, 0.7)]]:
+		var z: float = d[0]
+		box(Vector3(0.08, 2.2, 0.95), Vector3(-5.86, 1.1, z), Color(0.55, 0.3, 0.15))
+		prop(box(Vector3(0.1, 2.3, 0.08), Vector3(-5.84, 1.15, z - 0.5), Color(0.35, 0.2, 0.1)))
+		prop(box(Vector3(0.1, 2.3, 0.08), Vector3(-5.84, 1.15, z + 0.5), Color(0.35, 0.2, 0.1)))
+		prop(box(Vector3(0.1, 0.08, 1.08), Vector3(-5.84, 2.3, z), Color(0.35, 0.2, 0.1)))
+		prop(sphere(0.045, Vector3(-5.8, 1.05, z + 0.32), Color(0.95, 0.8, 0.3), 0.2))  # knob
+		prop(box(Vector3(0.03, 0.34, 0.6), Vector3(-5.81, 1.75, z), Color(0.95, 0.95, 0.9)))
+		wall_text(d[1], Vector3(-5.79, 1.75, z), PI / 2.0, d[2], 44, 6)
+	prop(box(Vector3(0.03, 0.3, 1.3), Vector3(-5.85, 2.9, -9.85), Color(0.1, 0.25, 0.45)))
+	wall_text("RESTROOMS", Vector3(-5.83, 2.9, -9.85), PI / 2.0, Color(1, 1, 1), 46, 6)
+
+	# --- big brass portholes with bolts, thick glass and a shine
+	for side in [-1.0, 1.0]:
+		for z in [-3.0, -6.5, -10.0]:
+			var x: float = side * 5.86
+			if side < 0.0 and z == -10.0:
+				continue  # the restroom sign hangs there
+			var rim := MeshInstance3D.new()
+			var tm := TorusMesh.new()
+			tm.inner_radius = 0.42
+			tm.outer_radius = 0.56
+			rim.mesh = tm
+			rim.material_override = std_mat(Color(0.8, 0.6, 0.25))
+			rim.position = Vector3(x, 2.6, z)
+			rim.rotation_degrees = Vector3(0, 0, 90)
+			prop(rim)
+			add_child(rim)
+			cylinder(0.43, 0.06, Vector3(x - side * 0.01, 2.6, z), Color(0.25, 0.65, 0.85), Vector3(0, 0, 90), 1.0)
+			var bolts := MultiMesh.new()
+			var bm := SphereMesh.new()
+			bm.radius = 0.035
+			bm.height = 0.07
+			bm.material = std_mat(Color(0.65, 0.5, 0.2))
+			bolts.transform_format = MultiMesh.TRANSFORM_3D
+			bolts.mesh = bm
+			bolts.instance_count = 8
+			for k in 8:
+				var a := TAU * k / 8.0
+				bolts.set_instance_transform(k, Transform3D(Basis(), Vector3(x - side * 0.06, 2.6 + sin(a) * 0.49, z + cos(a) * 0.49)))
+			var bmi := MultiMeshInstance3D.new()
+			bmi.multimesh = bolts
+			bmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			add_child(bmi)
+			# glass shine streaks
+			for k in 2:
+				var sh := prop(box(Vector3(0.01, 0.06 - k * 0.025, 0.36 - k * 0.14), Vector3(x - side * 0.05, 2.72 - k * 0.1, z - 0.06), Color(1, 1, 1), 1.5))
+				sh.rotation_degrees = Vector3(35, 0, 0)
+
+	# --- life ring and an anchor on the right wall
+	var ring := MeshInstance3D.new()
+	var rt := TorusMesh.new()
+	rt.inner_radius = 0.24
+	rt.outer_radius = 0.4
+	ring.mesh = rt
+	ring.material_override = std_mat(Color(1, 0.35, 0.2))
+	ring.position = Vector3(5.83, 2.5, -4.8)
+	ring.rotation_degrees = Vector3(0, 0, 90)
+	add_child(prop(ring))
+	for k in 4:
+		var a := TAU * k / 4.0 + PI / 4.0
+		var band := prop(box(Vector3(0.18, 0.1, 0.18), Vector3(5.8, 2.5 + sin(a) * 0.32, -4.8 + cos(a) * 0.32), Color(1, 1, 1)))
+		band.rotation.x = -a
+	wall_text("S.S. SALTY", Vector3(5.75, 1.95, -4.8), -PI / 2.0, Color(1, 1, 1), 34, 6)
+
+	# --- menu board + employee of the month behind the counter (seen from the customer side)
+	box(Vector3(3.2, 1.5, 0.08), Vector3(-1.0, 3.0, 5.36), Color(0.08, 0.1, 0.12))
+	prop(box(Vector3(3.3, 0.08, 0.1), Vector3(-1.0, 3.77, 5.34), Color(0.6, 0.4, 0.2)))
+	prop(box(Vector3(3.3, 0.08, 0.1), Vector3(-1.0, 2.23, 5.34), Color(0.6, 0.4, 0.2)))
+	wall_text("~ MENU ~", Vector3(-1.0, 3.55, 5.31), PI, Color(1, 0.85, 0.3), 70, 8)
+	var items := [["SALT BURGER", "3.50"], ["DOUBLE TROUBLE", "5.00"], ["KELP FRIES", "1.75"], ["SEAFOAM SODA", "1.25"]]
+	for i in items.size():
+		var row: Array = items[i]
+		var y := 3.22 - i * 0.24
+		var name_l := wall_text(row[0], Vector3(0.35, y, 5.31), PI, Color(0.95, 0.95, 0.9), 38, 4)
+		name_l.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
+		var price_l := wall_text(row[1], Vector3(-2.45, y, 5.31), PI, Color(0.5, 1.0, 0.6), 38, 4)
+		price_l.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	box(Vector3(0.75, 0.95, 0.06), Vector3(1.4, 2.6, 5.37), Color(0.85, 0.65, 0.2))
+	prop(box(Vector3(0.62, 0.7, 0.03), Vector3(1.4, 2.66, 5.33), Color(0.75, 0.88, 0.95)))
+	var emp := Sprite3D.new()
+	emp.texture = art_texture("cashier_front", {})[0] if ResourceLoader.exists(SPRITE_DIR % "cashier_front") else null
+	if emp.texture != null:
+		emp.pixel_size = 0.6 / emp.texture.get_width() * 1.0
+		emp.position = Vector3(1.4, 2.62, 5.31)
+		emp.rotation.y = PI
+		emp.alpha_cut = SpriteBase3D.ALPHA_CUT_DISCARD
+		emp.shaded = false
+		emp.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		add_child(emp)
+	wall_text("EMPLOYEE OF THE MONTH", Vector3(1.4, 2.21, 5.31), PI, Color(0.2, 0.1, 0.05), 22, 0)
+
+	# --- neon OPEN sign on the back wall, next to the door
+	box(Vector3(1.0, 0.45, 0.04), Vector3(3.6, 3.1, -12.36), Color(0.05, 0.05, 0.1))
+	open_sign = wall_text("OPEN", Vector3(3.6, 3.1, -12.32), 0.0, Color(1.6, 0.3, 0.8), 80, 10, Color(1.0, 0.3, 0.8, 0.5))
+
+	# --- potted coral in the back corner, trash can by the door
+	cylinder(0.3, 0.45, Vector3(-5.3, 0.225, -11.95), Color(0.75, 0.4, 0.25))
+	for k in 5:
+		var a := TAU * k / 5.0
+		var c := prop(cone(0.06, 0.02, r.randf_range(0.5, 0.9), Vector3(-5.3 + cos(a) * 0.12, 0.42, -11.95 + sin(a) * 0.12), Color(1.0, 0.45, 0.6), Vector3(sin(a) * 18.0, 0, cos(a) * 18.0)))
+		c.material_override = std_mat(Color(1.0, 0.45, 0.6))
+	cylinder(0.24, 0.7, Vector3(3.55, 0.35, -11.9), Color(0.3, 0.45, 0.35))
+	prop(cylinder(0.26, 0.05, Vector3(3.55, 0.72, -11.9), Color(0.25, 0.35, 0.3)))
+	for k in 4:  # wrappers spilling over the rim
+		prop(sphere(0.07, Vector3(3.45 + k * 0.08, 0.78, -11.85 + (k % 2) * 0.06), [Color(1, 0.9, 0.3), Color(1, 1, 1), Color(1, 0.4, 0.3)][k % 3], 0.0, 0.1))
+	prop(sphere(0.06, Vector3(3.95, 0.03, -11.6), Color(1, 1, 1), 0.0, 0.1))  # one missed the bin
+
+	# --- wet floor sign next to a soda spill
+	var wf := Vector3(-2.3, 0, -1.6)
+	for side in [-1.0, 1.0]:
+		var panel := box(Vector3(0.36, 0.62, 0.02), wf + Vector3(0, 0.3, side * 0.1), Color(1.0, 0.85, 0.05))
+		panel.rotation.x = side * 0.3
+		prop(panel)
+	wall_text("CAUTION\nWET FLOOR", wf + Vector3(0, 0.36, 0.2), 0.0, Color(0.1, 0.1, 0.1), 22, 0).rotation.x = 0.3
+
+	# --- dirt: soda puddle, ketchup splat, gum, footprints from the door, crumbs under tables
+	floor_marks(Color(0.45, 0.25, 0.1, 0.55), [[-2.0, -2.0, 0.55, 0.35, 0.3], [-1.6, -2.3, 0.25, 0.18, 1.0], [-2.5, -1.9, 0.2, 0.14, 2.0]])
+	floor_marks(Color(0.8, 0.05, 0.05, 0.75), [[-3.0, -4.3, 0.16, 0.11, 0.5], [-2.85, -4.4, 0.06, 0.05, 0.0], [-3.15, -4.15, 0.05, 0.04, 0.0]])
+	floor_marks(Color(1.0, 0.45, 0.7, 0.9), [[1.8, -4.5, 0.05, 0.04, 0.0], [-1.2, -8.2, 0.045, 0.04, 0.0], [3.0, -9.3, 0.05, 0.045, 0.0]])
+	var steps: Array = []
+	for i in 14:  # muddy footprints walking in from the door
+		var f := i / 13.0
+		var px := lerpf(4.9, 1.3, f) + (0.12 if i % 2 == 0 else -0.12)
+		var pz := lerpf(-11.6, -2.6, f)
+		steps.append([px, pz, 0.07, 0.12, -0.38])
+	floor_marks(Color(0.25, 0.18, 0.1, 0.35), steps)
+	var crumbs: Array = []
+	for tp in TABLES:
+		for k in 8:
+			crumbs.append([tp.x + r.randf_range(-0.7, 0.7), tp.z + r.randf_range(-0.7, 0.7), 0.025, 0.02, r.randf() * TAU])
+	floor_marks(Color(0.75, 0.55, 0.25, 0.9), crumbs)
+	floor_marks(Color(0.2, 0.2, 0.25, 0.18), [[-4.6, -5.4, 0.6, 0.4, 0.4], [-2.4, -9.0, 0.7, 0.45, 2.1], [2.2, -6.8, 0.5, 0.35, 1.0], [-4.9, -0.4, 0.45, 0.3, 0.2]])  # general grime
+
+
+func spawn_diners() -> void:
+	# Guests standing at the tables, chatting and eating (decoration only).
+	var spots := [Vector3(-4.25, 0, -3.95), Vector3(-2.95, 0, -3.9), Vector3(-4.2, 0, -7.45), Vector3(-3.0, 0, -7.4), Vector3(-3.6, 0, -10.55)]
+	for i in spots.size():
+		var a := make_actor("customer", make_customer_data(), "customer_back")
+		a.pivot.position = spots[i]
+		a.data["bob"] = rng.randf() * TAU
+		diners.append(a)
+	# their food on the tables
+	for tp in TABLES:
+		var b := flying_sprite(burger_tex, tp + Vector3(-0.1, 0.92, 0.05), 0.55)
+		b.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		var tr := flying_sprite(tray_tex, tp + Vector3(0.25, 0.85, 0.08), 0.6)
+		tr.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+
+
+func animate_decor(delta: float) -> void:
+	# guests bob and lean towards each other while they talk; slot machine lights chase, reels spin now and then
+	for a in diners:
+		var ph: float = a.data["bob"]
+		a.body.position.y = BODY_Y + maxf(0.0, sin(t * 2.3 + ph)) * 0.04
+		a.body.rotation.z = sin(t * 0.9 + ph) * 0.06
+	for k in slot_lights.size():
+		var on := int(t * 6.0) % slot_lights.size() == k or int(t * 6.0 + 3) % slot_lights.size() == k
+		var m: StandardMaterial3D = slot_lights[k].material_override
+		m.emission_energy_multiplier = 3.0 if on else 0.3
+	slot_spin_t -= delta
+	if slot_spin_t <= 0.0:
+		slot_spin_t = rng.randf_range(4.0, 9.0)
+		slot_spinning = 1.2
+	if slot_spinning > 0.0:
+		slot_spinning -= delta
+		for i in slot_reels.size():  # reels stop one after the other
+			if slot_spinning > i * 0.3:
+				slot_reels[i].text = SLOT_SYMBOLS[rng.randi() % SLOT_SYMBOLS.size()]
+	if open_sign:
+		open_sign.modulate.a = 1.0 if fmod(t, 5.0) > 0.25 else 0.35  # neon flicker
 
 
 # ---------------------------------------------------------------- the town outside
@@ -1138,14 +1449,40 @@ func set_art_quality(hq: bool) -> void:
 
 func override_name(kind: String, data: Dictionary) -> String:
 	# File name a custom PNG must have to replace this piece of procedural art.
+	# Customers can have numbered variants (customer_round_front_1.png ...); front and back
+	# use the same number. Without a variant (or file) the un-numbered name is used.
 	match kind:
-		"customer":
-			return "customer_%s_front" % BODY_NAMES[data["kind"]]
-		"customer_back":
-			return "customer_%s_back" % BODY_NAMES[data["kind"]]
+		"customer", "customer_back":
+			var base := "customer_%s_%s" % [BODY_NAMES[data["kind"]], "front" if kind == "customer" else "back"]
+			if data.has("variant") and ResourceLoader.exists(SPRITE_DIR % ("%s_%d" % [base, data["variant"]])):
+				return "%s_%d" % [base, data["variant"]]
+			return base
 		"cashier":
 			return "cashier_back"
 	return kind
+
+
+const SPRITE_VARIANTS := 4
+var art_height_cache := {}
+
+
+func art_height(tex: Texture2D) -> float:
+	# Height (metres) of a custom PNG's character, from its lowest opaque pixel... to the top one,
+	# so speech bubbles sit right on top of the drawn head.
+	if tex == null or tex.resource_path == "":
+		return -1.0
+	if art_height_cache.has(tex.resource_path):
+		return art_height_cache[tex.resource_path]
+	var img := tex.get_image()
+	if img == null:
+		return -1.0
+	if img.is_compressed():
+		img.decompress()
+	var used := img.get_used_rect()
+	var scale := float(CharacterArt.ART_SIZE) / img.get_width()
+	var h := (CharacterArt.FEET_PX - used.position.y * scale) * PIXEL
+	art_height_cache[tex.resource_path] = h
+	return h
 
 
 func art_texture(kind: String, data: Dictionary) -> Array:
@@ -1195,6 +1532,9 @@ func make_actor(kind: String, data: Dictionary, front_kind := "") -> Actor:
 		a.body.add_child(a.sprite_front)
 	if kind == "customer":
 		a.height = CharacterArt.customer_height_px(data) * PIXEL
+		var h := art_height(a.sprite.texture)
+		if h > 0.0:
+			a.height = h
 	return a
 
 
@@ -1202,7 +1542,7 @@ func free_actor(a: Actor) -> void:
 	leaving.erase(a)
 	for s in [a.sprite, a.sprite_front]:
 		if s != null and is_instance_valid(s):
-			var vp = s.get_meta("vp")
+			var vp = s.get_meta("vp") if s.has_meta("vp") else null  # PNG sprites have no viewport
 			if vp != null and is_instance_valid(vp):
 				vp.queue_free()
 	if is_instance_valid(a.pivot):
@@ -1224,6 +1564,7 @@ func make_customer_data() -> Dictionary:
 		"size": size,
 		"bob": rng.randf() * TAU,
 		"voice": rng.randf_range(1.25, 1.75) * [1.0, 1.12, 0.85][kind] / float(size),
+		"variant": rng.randi_range(1, SPRITE_VARIANTS),
 	}
 
 
@@ -1449,7 +1790,9 @@ func timer_fraction() -> float:
 		State.DECIDE:
 			return time_left / time_limit
 		State.ATTACK:
-			return attack_left / ATTACK_TIME
+			if attack_mode == "quiz" and quiz_pick != -1:
+				return -1.0  # answer locked in: no more ticking
+			return attack_left / attack_time
 		State.DANCE:
 			return dance_left / dance_beat
 		State.PRAY:
@@ -1505,7 +1848,8 @@ func setup_cinema_audio() -> void:
 		add_child(tp)
 		type_players.append(tp)
 	fx_player = AudioStreamPlayer.new()
-	fx_player.stream = make_boom()
+	fx_player.stream = EXPLOSION_SOUND
+	fx_player.volume_db = 4.0
 	add_child(fx_player)
 	sizzle_player = AudioStreamPlayer.new()
 	sizzle_player.stream = make_sizzle()
@@ -1739,9 +2083,10 @@ func start_cinematic() -> void:
 	boom_played = false
 	shot(INTRO_A, INTRO_A_LOOK, 0.0)
 	var crew := {
-		"commander": {"color": Color(0.95, 0.55, 0.2), "kind": 0, "hat": 0, "glasses": false, "size": 1.0},
-		"surfer": {"color": Color(0.15, 0.8, 0.95), "kind": 1, "hat": 0, "glasses": false, "size": 1.0},
-		"soldier": {"color": Color(0.95, 0.85, 0.2), "kind": 2, "hat": 0, "glasses": false, "size": 1.0},
+		# "variant" picks the sprite (customer_<body>_front_<n>.png); costume props are drawn on top
+		"commander": {"color": Color(0.95, 0.55, 0.2), "kind": 0, "hat": 0, "glasses": false, "size": 1.0, "variant": 3},
+		"surfer": {"color": Color(0.15, 0.8, 0.95), "kind": 1, "hat": 0, "glasses": false, "size": 1.0, "variant": 3},
+		"soldier": {"color": Color(0.95, 0.85, 0.2), "kind": 2, "hat": 0, "glasses": false, "size": 1.0, "variant": 1},
 	}
 	for k in crew:
 		cine_tex[k] = art_texture("customer", crew[k])[0]
@@ -1762,7 +2107,7 @@ func update_cinematic(delta: float) -> void:
 	if cine_t >= Cine.T_MUSIC and not valk_player.playing:
 		valk_player.volume_db = -40.0
 		valk_player.play(Cine.MUSIC_OFFSET)  # skip ahead to the build-up
-		create_tween().tween_property(valk_player, "volume_db", -1.0, 4.0).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
+		create_tween().tween_property(valk_player, "volume_db", 5.0, 4.0).set_trans(Tween.TRANS_SINE).set_ease(Tween.EASE_OUT)
 	update_typewriter()
 	update_dialogue()
 	update_heli_sound(delta)
@@ -1914,7 +2259,7 @@ func end_cinematic() -> void:
 	cine_3d = false
 	shake = 0.0
 	create_tween().tween_property(valk_lowpass, "cutoff_hz", 20000.0, 0.6)
-	create_tween().tween_property(valk_player, "volume_db", -10.0, 1.0)
+	create_tween().tween_property(valk_player, "volume_db", -4.0, 1.0)
 	go_title()
 
 
@@ -2200,7 +2545,7 @@ func holy_audio(start: bool, fade := 0.25) -> void:
 	if start:
 		holy_player.volume_db = -30.0
 		holy_player.play()
-		holy_tween.tween_property(holy_player, "volume_db", 0.0, fade)
+		holy_tween.tween_property(holy_player, "volume_db", 6.0, fade)
 		holy_tween.tween_property(music_player, "volume_db", MUSIC_DUCK_DB, fade)
 	else:
 		holy_tween.tween_property(holy_player, "volume_db", -40.0, fade)
@@ -2254,14 +2599,32 @@ func pray_fail() -> void:
 
 # ---------------------------------------------------------------- attacking
 
-func start_attack() -> void:
+func start_attack(forced_mode := "") -> void:
 	state = State.ATTACK
 	shot_decide()
-	attack_seq.clear()
-	for i in 4 + mini(2, int(served / 10.0)):
-		attack_seq.append(rng.randi_range(0, 3))
-	attack_idx = 0
-	attack_left = ATTACK_TIME
+	# pick a variant, never the same one three times in a row
+	var modes := ["combo", "rage", "quiz"]
+	attack_mode = modes[rng.randi() % 3]
+	if attack_mode == last_attack_mode and rng.randf() < 0.6:
+		attack_mode = modes[(modes.find(attack_mode) + 1 + rng.randi() % 2) % 3]
+	if forced_mode != "":
+		attack_mode = forced_mode
+	last_attack_mode = attack_mode
+	match attack_mode:
+		"combo":
+			attack_seq.clear()
+			for i in 4 + mini(3, int(served / 8.0)):
+				attack_seq.append(rng.randi_range(0, 3))
+			attack_idx = 0
+			attack_time = maxf(2.2, ATTACK_TIME - served * 0.03)
+		"rage":
+			rage = 0.0
+			rage_need = 10 + mini(12, int(served * 0.5))
+			rage_drain = minf(0.3, 0.06 + served * 0.008)
+			attack_time = maxf(3.4, 5.0 - served * 0.04)
+		"quiz":
+			start_quiz()
+	attack_left = attack_time
 
 
 func attack_input(dir: int) -> void:
@@ -2276,6 +2639,7 @@ func attack_input(dir: int) -> void:
 
 
 func attack_success(forced_kind := -1) -> void:
+	end_attack_variant()
 	state = State.RESOLVING
 	shot_attack()
 	var c := take_current()
@@ -2294,6 +2658,421 @@ func attack_success(forced_kind := -1) -> void:
 	else:
 		correct()
 	schedule_next(1.8)
+
+
+# ---------------------------------------------------------------- attack variants: rage & quiz
+
+const QUIZ := [
+	# [question, correct answer, wrong, wrong, wrong, tier (0 easiest)]
+	["What colour is the sky on a clear day?", "Blue", "Green", "Red", "Purple", 0],
+	["How many days are in a week?", "7", "5", "10", "12", 0],
+	["Which animal says 'moo'?", "Cow", "Cat", "Duck", "Dog", 0],
+	["What do fish use to breathe underwater?", "Gills", "Lungs", "Ears", "Fins", 0],
+	["What is 2 + 2?", "4", "3", "5", "22", 0],
+	["Which of these is a fruit?", "Apple", "Carrot", "Potato", "Onion", 0],
+	["What is frozen water called?", "Ice", "Steam", "Sand", "Glass", 0],
+	["How many wheels does a bicycle have?", "2", "3", "4", "1", 0],
+	["What goes between the buns of a burger?", "A patty", "A sock", "A shoe", "A rock", 0],
+	["Which sea animal has eight arms?", "Octopus", "Shark", "Dolphin", "Whale", 0],
+	["What colour is a ripe banana?", "Yellow", "Blue", "Black", "Purple", 0],
+	["What do bees make?", "Honey", "Milk", "Bread", "Cheese", 0],
+	["Which one is the biggest?", "Whale", "Shrimp", "Goldfish", "Crab", 0],
+	["What is the largest ocean on Earth?", "Pacific", "Atlantic", "Indian", "Arctic", 1],
+	["How many minutes are in an hour?", "60", "100", "30", "24", 1],
+	["Which planet do we live on?", "Earth", "Mars", "Venus", "Jupiter", 1],
+	["Which of these is a mammal?", "Dolphin", "Shark", "Tuna", "Jellyfish", 1],
+	["What is 5 x 6?", "30", "11", "25", "56", 1],
+	["What gas do we need to breathe?", "Oxygen", "Helium", "Neon", "Smoke", 1],
+	["What is the capital of France?", "Paris", "Berlin", "Madrid", "Rome", 1],
+	["How many legs does a spider have?", "8", "6", "10", "4", 1],
+	["What is a baby fish called?", "Fry", "Puppy", "Calf", "Kitten", 1],
+	["Which animal walks sideways?", "Crab", "Eel", "Seal", "Squid", 1],
+	["A group of fish is called a...?", "School", "Office", "Garage", "Choir", 1],
+	["Blue + yellow paint makes...?", "Green", "Orange", "Purple", "Pink", 1],
+	["How many continents are there?", "7", "5", "3", "12", 1],
+	["What is the biggest animal that ever lived?", "Blue whale", "T-rex", "Elephant", "Giraffe", 2],
+	["Which planet is called the Red Planet?", "Mars", "Venus", "Saturn", "Neptune", 2],
+	["What is H2O?", "Water", "Salt", "Gold", "Air", 2],
+	["How many sides does a hexagon have?", "6", "5", "8", "7", 2],
+	["What is 12 x 12?", "144", "124", "132", "154", 2],
+	["What does a pufferfish do when scared?", "Puffs up", "Glows", "Flies", "Sings", 2],
+	["What is the hardest natural material?", "Diamond", "Gold", "Iron", "Glass", 2],
+	["How many bones does an adult human have?", "206", "106", "306", "56", 2],
+	["Which instrument has 88 keys?", "Piano", "Guitar", "Violin", "Drum", 2],
+	["In which country are the Giza pyramids?", "Egypt", "Mexico", "Peru", "Greece", 2],
+	["Water freezes at how many degrees Celsius?", "0", "10", "100", "-10", 2],
+	["Sharks are a kind of...?", "Fish", "Mammal", "Reptile", "Bird", 2],
+	["What is the smallest prime number?", "2", "1", "3", "0", 2],
+]
+const QUIZ_LOCK := 1.0     # seconds the "final answer" hangs before the reveal
+const QUIZ_REVEAL := 1.0   # seconds the result is shown
+
+
+func setup_attack_variants() -> void:
+	# keys: C or S skips the opening cutscene
+	if not InputMap.has_action("skip_cutscene"):
+		InputMap.add_action("skip_cutscene")
+		for k in [KEY_C, KEY_S]:
+			var e := InputEventKey.new()
+			e.physical_keycode = k
+			InputMap.action_add_event("skip_cutscene", e)
+	# keys: SPACE to mash, 1-4 / A-D as alternative quiz answers
+	if not InputMap.has_action("mash"):
+		InputMap.add_action("mash")
+		var ev := InputEventKey.new()
+		ev.physical_keycode = KEY_SPACE
+		InputMap.action_add_event("mash", ev)
+		for i in 4:
+			InputMap.add_action("quiz_%d" % i)
+			for k in [KEY_1 + i, KEY_A + i]:
+				var e := InputEventKey.new()
+				e.physical_keycode = k
+				InputMap.action_add_event("quiz_%d" % i, e)
+	# steam jets above the cashier's head
+	var steam_mesh := SphereMesh.new()
+	steam_mesh.radius = 0.07
+	steam_mesh.height = 0.14
+	steam_mesh.material = fx_mat(Color(1, 1, 1, 0.75), 0.0)
+	for side in [-1.0, 1.0]:
+		var p := CPUParticles3D.new()
+		p.mesh = steam_mesh
+		p.amount = 18
+		p.lifetime = 0.55
+		p.emitting = false
+		p.direction = Vector3(side * 0.6, 1, 0)
+		p.spread = 18.0
+		p.gravity = Vector3(0, 2.0, 0)
+		p.initial_velocity_min = 1.6
+		p.initial_velocity_max = 2.6
+		p.scale_amount_min = 0.6
+		p.scale_amount_max = 1.4
+		p.position = Vector3(side * 0.42, cashier.height + 0.05, -0.15)
+		cashier.pivot.add_child(p)
+		rage_steam.append(p)
+	# --- power-up aura (anime style): two glowing shells behind him
+	var shell := SphereMesh.new()
+	shell.radius = 1.0
+	shell.height = 2.0
+	for i in 2:
+		var m := fx_mat(Color(1.0, 0.7, 0.05, 0.0) if i == 0 else Color(1.0, 0.92, 0.45, 0.0), 3.0)
+		var a := fx_mesh(cashier.pivot, shell, m, Vector3(0, cashier.height * 0.55, 0.4))
+		a.visible = false
+		aura_meshes.append(a)
+	# energy flames streaming upwards around his body
+	var flame := SphereMesh.new()
+	flame.radius = 0.08
+	flame.height = 0.7
+	flame.material = fx_mat(Color(1.0, 0.85, 0.3, 0.85), 3.0)
+	aura_flames = CPUParticles3D.new()
+	aura_flames.mesh = flame
+	aura_flames.amount = 110
+	aura_flames.lifetime = 0.45
+	aura_flames.emitting = false
+	aura_flames.emission_shape = CPUParticles3D.EMISSION_SHAPE_BOX
+	aura_flames.emission_box_extents = Vector3(1.0, 0.9, 0.1)
+	aura_flames.direction = Vector3(0, 1, 0)
+	aura_flames.spread = 8.0
+	aura_flames.gravity = Vector3(0, 3.0, 0)
+	aura_flames.initial_velocity_min = 2.0
+	aura_flames.initial_velocity_max = 3.6
+	aura_flames.scale_amount_min = 0.6
+	aura_flames.scale_amount_max = 1.3
+	aura_flames.position = Vector3(0, cashier.height * 0.45, 0.3)
+	cashier.pivot.add_child(aura_flames)
+	# pebbles lifting off the floor around him
+	var rock := BoxMesh.new()
+	rock.size = Vector3.ONE * 0.07
+	rock.material = std_mat(Color(0.55, 0.5, 0.45))
+	aura_rocks = CPUParticles3D.new()
+	aura_rocks.mesh = rock
+	aura_rocks.amount = 30
+	aura_rocks.lifetime = 1.6
+	aura_rocks.emitting = false
+	aura_rocks.emission_shape = CPUParticles3D.EMISSION_SHAPE_BOX
+	aura_rocks.emission_box_extents = Vector3(1.3, 0.02, 0.9)
+	aura_rocks.direction = Vector3(0, 1, 0)
+	aura_rocks.spread = 10.0
+	aura_rocks.gravity = Vector3(0, 0.4, 0)
+	aura_rocks.initial_velocity_min = 0.5
+	aura_rocks.initial_velocity_max = 1.3
+	aura_rocks.angular_velocity_min = -200.0
+	aura_rocks.angular_velocity_max = 200.0
+	aura_rocks.scale_amount_min = 0.5
+	aura_rocks.scale_amount_max = 1.5
+	aura_rocks.position = Vector3(0, 0.05, 0.3)
+	cashier.pivot.add_child(aura_rocks)
+	aura_light = OmniLight3D.new()
+	aura_light.light_color = Color(1.0, 0.8, 0.35)
+	aura_light.omni_range = 4.0
+	aura_light.light_energy = 0.0
+	aura_light.position = Vector3(0, cashier.height * 0.6, -0.4)
+	cashier.pivot.add_child(aura_light)
+	charge_player = AudioStreamPlayer.new()
+	charge_player.stream = make_charge_loop()
+	charge_player.volume_db = -60.0
+	add_child(charge_player)
+	# sounds
+	mash_player = AudioStreamPlayer.new()
+	mash_player.stream = make_clack(0)
+	mash_player.volume_db = -8.0
+	add_child(mash_player)
+	quiz_music = AudioStreamPlayer.new()
+	quiz_music.stream = make_quiz_loop()
+	quiz_music.volume_db = -6.0
+	add_child(quiz_music)
+	quiz_fx = AudioStreamPlayer.new()
+	quiz_fx.volume_db = -4.0
+	add_child(quiz_fx)
+	quiz_sting = {"lock": make_quiz_sting("lock"), "right": make_quiz_sting("right"), "wrong": make_quiz_sting("wrong")}
+
+
+func update_attack(delta: float) -> void:
+	match attack_mode:
+		"combo":
+			attack_left -= delta
+			if attack_left <= 0.0:
+				attack_fail()
+		"rage":
+			attack_left -= delta
+			rage = maxf(0.0, rage - rage_drain * delta)
+			update_rage_fx()
+			if attack_left <= 0.0:
+				add_popup("Ran out of steam...", Vector2(0, 300), Color(1, 0.6, 0.4), 30, 1.0)
+				attack_fail()
+		"quiz":
+			if quiz_pick == -1:
+				attack_left -= delta
+				if attack_left <= 0.0:
+					quiz_pick = -2
+					quiz_t = QUIZ_LOCK  # time's up: straight to the reveal
+			else:
+				quiz_t += delta
+			if quiz_pick != -1 and quiz_t >= QUIZ_LOCK and not quiz_revealed:
+				quiz_revealed = true
+				quiz_fx.stream = quiz_sting["right"] if quiz_pick == quiz["correct"] else quiz_sting["wrong"]
+				quiz_fx.play()
+				quiz_music.stop()
+			if quiz_revealed and quiz_t >= QUIZ_LOCK + QUIZ_REVEAL:
+				if quiz_pick == quiz["correct"]:
+					attack_success()
+				else:
+					add_popup("Wrong answer!" if quiz_pick >= 0 else "Time's up!", Vector2(0, 300), Color(1, 0.5, 0.4), 34, 1.0)
+					attack_fail()
+
+
+func end_attack_variant() -> void:
+	# put the cashier and the soundtrack back to normal after rage / quiz
+	if attack_mode == "rage":
+		rage = 0.0
+		update_rage_fx()
+		cashier.pivot.position = CASHIER_POS
+		cashier.pivot.scale = Vector3.ONE
+		# still in the ATTACK state here, so switch the power-up effects off explicitly
+		charge_player.stop()
+		aura_flames.emitting = false
+		aura_rocks.emitting = false
+		aura_light.light_energy = 0.0
+		for a in aura_meshes:
+			a.visible = false
+		for st in rage_steam:
+			st.emitting = false
+	if attack_mode == "quiz":
+		quiz_music.stop()
+		create_tween().tween_property(music_player, "volume_db", MUSIC_DB, 0.6)
+
+
+# --- rage
+
+func rage_press() -> void:
+	rage = minf(1.0, rage + 1.0 / rage_need)
+	mash_player.pitch_scale = 0.8 + rage * 0.9
+	mash_player.play()
+	shake = maxf(shake, 2.0 + rage * 8.0)
+	if rage >= 1.0:
+		add_popup(pick(["MAXIMUM POWER!", "FULL POWER!", "AAAAAARGH!!"]), Vector2(0, 230), Color(1, 0.85, 0.2), 54, 1.0)
+		power_flash = 1.0
+		shake = 30.0
+		impact_burst(chest(cashier))
+		attack_success()
+
+
+func update_rage_fx() -> void:
+	var r := rage
+	var active := state == State.ATTACK and attack_mode == "rage"
+	# red with anger first, then glowing gold as he powers up
+	var tint_col := Color(1.0, 0.08, 0.04).lerp(Color(1.0, 0.85, 0.3), smoothstep(0.55, 1.0, r))
+	for sp in [cashier.sprite, cashier.sprite_front]:
+		if sp != null:
+			sp.material_override.set_shader_parameter("tint", Color(tint_col, r * 0.65))
+	# aura grows and flickers like a flame
+	var flick := 0.85 + 0.15 * sin(t * 37.0) * sin(t * 23.0)
+	for i in aura_meshes.size():
+		var a := aura_meshes[i]
+		var k := smoothstep(0.25, 0.9, r)
+		a.visible = active and k > 0.01
+		var sz := (1.25 - i * 0.3) * (0.75 + 0.5 * k) * flick
+		a.scale = Vector3(0.95 * sz, 1.6 * sz + 0.1 * sin(t * 19.0 + i), 0.3 * sz)
+		var mat: StandardMaterial3D = a.material_override
+		mat.albedo_color.a = k * (0.5 if i == 0 else 0.6) * flick
+	aura_flames.emitting = active and r > 0.3
+	aura_flames.speed_scale = 0.7 + r * 0.8
+	aura_rocks.emitting = active and r > 0.5
+	aura_light.light_energy = (r * r * 4.0 * flick) if active else 0.0
+	if active:
+		if not charge_player.playing:
+			charge_player.play()
+		charge_player.pitch_scale = 0.6 + r * 1.1
+		charge_player.volume_db = lerpf(-30.0, -6.0, r)
+	elif charge_player.playing:
+		charge_player.stop()
+	if state == State.ATTACK and attack_mode == "rage":
+		# puffs up, trembles harder and harder
+		var jitter := Vector3(rng.randf_range(-1, 1), rng.randf_range(-0.3, 1), rng.randf_range(-1, 1)) * 0.035 * r * r
+		cashier.pivot.position = CASHIER_POS + jitter
+		cashier.pivot.scale = Vector3(1.0 + 0.2 * r, 1.0 + 0.14 * r, 1.0 + 0.2 * r)
+		shake = maxf(shake, r * r * r * 7.0)
+	for st in rage_steam:
+		st.emitting = r > 0.45 and state == State.ATTACK
+		st.speed_scale = 0.8 + r
+
+
+# --- quiz
+
+func make_charge_loop() -> AudioStreamWAV:
+	# Power-up hum: buzzy low drone + airy rushing noise; 1 s loop, pitch follows the rage bar.
+	var rate := 22050
+	var n := rate
+	var data := PackedByteArray()
+	data.resize(n * 2)
+	var r := RandomNumberGenerator.new()
+	r.seed = 77
+	var lp := 0.0
+	for i in n:
+		var tt := float(i) / rate
+		var saw := fmod(110.0 * tt, 1.0) * 2.0 - 1.0
+		var saw2 := fmod(111.0 * tt * 2.0, 1.0) * 2.0 - 1.0
+		lp += (r.randf_range(-1.0, 1.0) - lp) * 0.25
+		var v := saw * 0.22 + saw2 * 0.12 + lp * 0.5 + sin(TAU * 55.0 * tt) * 0.3
+		v *= 0.8 + 0.2 * sin(TAU * 8.0 * tt)  # wobble
+		data.encode_s16(i * 2, int(clampf(v, -1.0, 1.0) * 24000.0))
+	var st := AudioStreamWAV.new()
+	st.format = AudioStreamWAV.FORMAT_16_BITS
+	st.mix_rate = rate
+	st.data = data
+	st.loop_mode = AudioStreamWAV.LOOP_FORWARD
+	st.loop_end = n
+	return st
+
+
+func start_quiz() -> void:
+	# easy questions first, slightly harder ones (and less time) the longer you survive
+	var tier_max := 0 if served < 6 else (1 if served < 14 else 2)
+	var tier_min := 0 if served < 14 else 1
+	var pool: Array[int] = []
+	for i in QUIZ.size():
+		var tier: int = QUIZ[i][5]
+		if tier >= tier_min and tier <= tier_max and not quiz_used.has(i):
+			pool.append(i)
+	if pool.is_empty():
+		quiz_used.clear()
+		for i in QUIZ.size():
+			if int(QUIZ[i][5]) <= tier_max:
+				pool.append(i)
+	var qi: int = pool[rng.randi() % pool.size()]
+	quiz_used.append(qi)
+	var q: Array = QUIZ[qi]
+	var answers: Array = [q[1], q[2], q[3], q[4]]
+	answers.shuffle()
+	quiz = {"q": q[0], "answers": answers, "correct": answers.find(q[1])}
+	quiz_pick = -1
+	quiz_t = 0.0
+	quiz_revealed = false
+	attack_time = maxf(4.0, 9.0 - served * 0.2)
+	create_tween().tween_property(music_player, "volume_db", MUSIC_DB - 28.0, 0.4)
+	quiz_music.play()
+
+
+func quiz_answer(i: int) -> void:
+	if state != State.ATTACK or attack_mode != "quiz" or quiz_pick != -1:
+		return
+	quiz_pick = i
+	quiz_t = 0.0
+	quiz_fx.stream = quiz_sting["lock"]
+	quiz_fx.play()
+
+
+func make_quiz_loop() -> AudioStreamWAV:
+	# Original quiz-show suspense bed: dark pad, double heartbeat thump, ticking clock, rising shimmer.
+	# 12 beats at 90 BPM = 8 s, every frequency fits a whole number of cycles so it loops cleanly.
+	var rate := 22050
+	var length := 8.0
+	var n := int(rate * length)
+	var beat := 60.0 / 90.0
+	var data := PackedByteArray()
+	data.resize(n * 2)
+	var pad := [73.5, 110.0, 146.75, 174.625, 220.0]  # D2 A2 D3 F3 A3 (rounded to whole cycles)
+	for i in n:
+		var tt := float(i) / rate
+		var v := 0.0
+		# pad with a slow swell
+		var swell := 0.75 + 0.25 * sin(TAU * tt / length)
+		for k in pad.size():
+			var f: float = pad[k]
+			v += (sin(TAU * f * tt) + 0.35 * sin(TAU * f * 2.0 * tt)) * (0.09 if k < 2 else 0.05) * swell
+		# heartbeat: two low thumps per beat
+		var bt := fmod(tt, beat)
+		for off in [0.0, 0.17]:
+			var x: float = bt - off
+			if x >= 0.0:
+				v += sin(TAU * 52.0 * x) * exp(-x * 18.0) * (0.55 if off == 0.0 else 0.35)
+		# clock tick on every half beat, alternating pitch
+		var ht := fmod(tt, beat * 0.5)
+		var idx := int(tt / (beat * 0.5)) % 2
+		v += sin(TAU * (1760.0 if idx == 0 else 1320.0) * ht) * exp(-ht * 90.0) * 0.12
+		# high shimmer that brightens through the loop
+		v += sin(TAU * 880.0 * tt) * sin(TAU * 0.125 * tt) * 0.025
+		data.encode_s16(i * 2, int(clampf(v, -1.0, 1.0) * 26000.0))
+	var st := AudioStreamWAV.new()
+	st.format = AudioStreamWAV.FORMAT_16_BITS
+	st.mix_rate = rate
+	st.data = data
+	st.loop_mode = AudioStreamWAV.LOOP_FORWARD
+	st.loop_end = n
+	return st
+
+
+func make_quiz_sting(kind: String) -> AudioStreamWAV:
+	var rate := 22050
+	var dur := 1.2
+	var n := int(rate * dur)
+	var data := PackedByteArray()
+	data.resize(n * 2)
+	for i in n:
+		var tt := float(i) / rate
+		var v := 0.0
+		match kind:
+			"lock":  # deep hit + suspended shimmer
+				v = sin(TAU * lerpf(90.0, 45.0, minf(tt * 2.0, 1.0)) * tt) * exp(-tt * 3.0) * 0.8
+				v += (sin(TAU * 587.3 * tt) + sin(TAU * 880.0 * tt)) * 0.12 * exp(-tt * 1.6) * minf(1.0, tt * 20.0)
+			"right":  # bright rising major arpeggio
+				var notes := [523.25, 659.25, 783.99, 1046.5]
+				for k in 4:
+					var x := tt - k * 0.09
+					if x >= 0.0:
+						var f: float = notes[k]
+						v += (sin(TAU * f * x) + 0.4 * sin(TAU * f * 2.0 * x)) * exp(-x * 2.5) * 0.22
+			_:  # wrong: falling buzzy two-note groan
+				var f := 220.0 if tt < 0.35 else 165.0
+				var ph := fmod(f * tt, 1.0)
+				v = (ph * 2.0 - 1.0) * 0.35 * exp(-maxf(0.0, tt - 0.35) * 2.5)
+				v += sin(TAU * f * 0.5 * tt) * 0.3 * exp(-tt * 1.5)
+		v *= minf(1.0, tt * 400.0)
+		data.encode_s16(i * 2, int(clampf(v, -1.0, 1.0) * 28000.0))
+	var st := AudioStreamWAV.new()
+	st.format = AudioStreamWAV.FORMAT_16_BITS
+	st.mix_rate = rate
+	st.data = data
+	return st
 
 
 # ---------------------------------------------------------------- attack animations
@@ -2761,6 +3540,7 @@ func attack_giant_slap(c: Actor) -> void:
 
 
 func attack_fail() -> void:
+	end_attack_variant()
 	state = State.RESOLVING
 	shot_overview()
 	var c := take_current()
@@ -2858,7 +3638,8 @@ func restart(to_title: bool) -> void:
 	# Try again skips straight to the countdown; Menu goes back to the start screen.
 	skip_title = not to_title
 	skip_cinematic = to_title
-	get_tree().reload_current_scene()
+	# fade to a black loading screen, reload, fade back in (see fader.gd)
+	load("res://scripts/fader.gd").get_or_create(get_tree()).reload_scene()
 
 
 func is_over() -> bool:
@@ -2943,9 +3724,7 @@ func _process(delta: float) -> void:
 			if time_left <= 0.0:
 				timeout()
 		State.ATTACK:
-			attack_left -= delta
-			if attack_left <= 0.0:
-				attack_fail()
+			update_attack(delta)
 		State.FLIP:
 			for p in patties:
 				if not p["flipped"]:
@@ -2966,6 +3745,7 @@ func _process(delta: float) -> void:
 				pray_left -= delta
 				if pray_left <= 0.0:
 					pray_fail()
+	animate_decor(delta)
 	for j in jellies:
 		var n: Node3D = j["node"]
 		var ph: float = j["phase"]
@@ -2988,6 +3768,7 @@ func _process(delta: float) -> void:
 	update_crowd_sound(delta)
 	bar_shown = lerpf(bar_shown, float(bar), 1.0 - exp(-12.0 * delta))
 	shake = maxf(0.0, shake - 40.0 * delta)
+	power_flash = maxf(0.0, power_flash - delta * 3.0)
 	var dl := danger_level()
 	danger = lerpf(danger, DANGER_VIGNETTE[dl], 1.0 - exp(-4.0 * delta))
 	danger_mat.set_shader_parameter("strength", danger * (0.85 + 0.15 * sin(t * 4.0)))
@@ -3007,6 +3788,8 @@ func _process(delta: float) -> void:
 		punch = exp(-(beat - floor(beat)) * 7.0) * keys_mix
 	camera.fov = BASE_FOV - BEAT_ZOOM_DEG * punch
 	update_chase(delta)
+	if state == State.ATTACK and attack_mode == "rage":
+		camera.fov += smoothstep(0.2, 1.0, rage) * 14.0  # pull back so the whole power-up aura is in frame
 	# The title and the 2D part of the cinematic cover the whole screen, so the
 	# 3D world behind them doesn't need to be drawn. (Kept on for the first second so the
 	# shaders are built while nothing can stutter visibly.)
@@ -3031,7 +3814,7 @@ func handle_input() -> void:
 	prev_any = any_now
 	match state:
 		State.CINEMA:
-			if any_just and cine_t > 0.5 and cine_skip < 0.0:
+			if Input.is_action_just_pressed("skip_cutscene") and cine_t > 0.5 and cine_skip < 0.0:
 				cine_skip = 0.0  # fade to black, then the title fades in
 				voice.stop()
 		State.TITLE:
@@ -3046,8 +3829,19 @@ func handle_input() -> void:
 			elif dir == 0:
 				start_attack()
 		State.ATTACK:
-			if dir >= 0:
-				attack_input(dir)
+			match attack_mode:
+				"combo":
+					if dir >= 0:
+						attack_input(dir)
+				"rage":
+					if Input.is_action_just_pressed("mash"):
+						rage_press()
+				"quiz":
+					if dir >= 0:
+						quiz_answer(dir)
+					for i in 4:
+						if Input.is_action_just_pressed("quiz_%d" % i):
+							quiz_answer(i)
 		State.FLIP:
 			if dir >= 0 and dir <= 2:
 				flip_patty(dir)

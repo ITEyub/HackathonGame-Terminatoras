@@ -7,6 +7,7 @@ uniform float seed = 0.0;
 uniform float caustic_strength = 0.07;
 uniform float saturation = 1.3;
 uniform vec3 rim_color : source_color = vec3(0.6, 0.9, 1.0);
+uniform vec4 tint = vec4(1.0, 0.0, 0.0, 0.0);  // rgb colour, a = strength (rage)
 
 varying vec3 wpos;
 
@@ -30,4 +31,5 @@ void fragment() {
 	col += vec3(0.6, 0.9, 1.0) * caustic_pattern(wpos.xy * 1.3 + vec2(wpos.z), TIME) * caustic_strength;
 	float luma = dot(col, vec3(0.299, 0.587, 0.114));
 	ALBEDO = clamp(mix(vec3(luma), col, saturation), 0.0, 1.0);
+	ALBEDO = mix(ALBEDO, tint.rgb * (0.55 + 0.45 * luma), tint.a);
 }

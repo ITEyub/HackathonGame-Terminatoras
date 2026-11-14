@@ -5,7 +5,6 @@ extends Node2D
 
 const Toon := preload("res://scripts/toon_ui.gd")
 const FONT_FILE := preload("res://assets/fonts/Fredoka.ttf")
-const DanceScene := preload("res://scripts/dance_scene.gd")
 const SETTINGS_PATH := "user://settings.cfg"
 
 # game.gd State values (keep in sync with its enum)
@@ -15,7 +14,7 @@ const PAUSABLE := [0, 1, 2, 3, 4, 5, 6, 11, 12]  # TALK..RESOLVING, INTRO, COUNT
 const GFX_NAMES := ["MIN", "MID", "MAX"]
 const RED := Color(0.95, 0.18, 0.2)
 
-enum Page { NONE, PAUSE, OPTIONS, TUTORIAL, DANCE }
+enum Page { NONE, PAUSE, OPTIONS, TUTORIAL }
 
 var game  # game.gd root
 var font: Font
@@ -28,13 +27,14 @@ var open_t := 0.0  # 0..1 pop-in animation
 var volume := 0.8  # 0..1, master bus
 var graphics := 2  # 0 = min, 1 = mid, 2 = max
 var tutorial_seen := false
+var tutorial_saved := false  # what is on disk; only finishing the tutorial changes it
 
 # tutorial
 const TUT_SLIDES := [
 	{"title": "WELCOME!", "text": "You're the new cashier at SeaSaltBurger. Customers line up one by one and tell you what they want."},
 	{"title": "NICE OR MEAN?", "text": "Listen to every customer. Nice ones deserve a burger. Rude ones deserve... something else."},
 	{"title": "YOUR CALL", "text": "Press  →  to SERVE a nice customer, press  ←  to ATTACK a mean one. Decide before the timer runs out - it gets faster!"},
-	{"title": "MINIGAMES", "text": "Every choice starts a quick arrow-key minigame: flip the patties, dance, pray from memory - or type the attack combo!"},
+	{"title": "MINIGAMES", "text": "Serving: flip the patties, dance or pray from memory. Attacking: type the combo, mash SPACE to rage - or win a quiz!"},
 	{"title": "DON'T GET FIRED", "text": "Right calls fill your job bar and boost your multiplier. Mistakes push you toward the skull. Reach it and you're FIRED!"},
 ]
 var tut_slide := 0
@@ -53,8 +53,6 @@ var pressed_btn = null
 var mouse_was_down := false
 var dragging_volume := false
 var slider_rect := Rect2()
-var secret_rect := Rect2()  # hidden dance button: a faint music note in the pause window corner
-var secret_hover := 0.0
 
 
 func _ready() -> void:
@@ -98,14 +96,15 @@ func load_settings() -> void:
 	if cf.load(SETTINGS_PATH) == OK:
 		volume = clampf(float(cf.get_value("audio", "volume", volume)), 0.0, 1.0)
 		graphics = clampi(int(cf.get_value("video", "graphics", graphics)), 0, 2)
-		tutorial_seen = bool(cf.get_value("progress", "tutorial_seen", false))
+		tutorial_saved = bool(cf.get_value("progress", "tutorial_seen", false))
+		tutorial_seen = tutorial_saved
 
 
 func save_settings() -> void:
 	var cf := ConfigFile.new()
 	cf.set_value("audio", "volume", volume)
 	cf.set_value("video", "graphics", graphics)
-	cf.set_value("progress", "tutorial_seen", tutorial_seen)
+	cf.set_value("progress", "tutorial_seen", tutorial_saved)
 	cf.save(SETTINGS_PATH)
 
 
@@ -165,15 +164,12 @@ func do_action(action: String) -> void:
 			selected = 2
 		"tutorial":
 			open_tutorial(Callable())
-		"dance":
-			start_dance()
 		"tut_back":
 			tut_go(-1)
 		"tut_next":
 			tut_go(1)
 		"menu":
-			get_tree().paused = false
-			game.restart(true)
+			game.restart(true)  # stays paused behind the fade; fader.gd unpauses before reloading
 		"quit":
 			get_tree().quit()
 		"gfx0", "gfx1", "gfx2":
@@ -189,23 +185,6 @@ func set_graphics(level: int) -> void:
 func set_volume(v: float) -> void:
 	volume = clampf(v, 0.0, 1.0)
 	apply_volume()
-
-
-# ---------------------------------------------------------------- dance break
-
-func start_dance() -> void:
-	# 30 s cutscene, unskippable: input is ignored until it ends, then the pause menu returns.
-	page = Page.DANCE
-	pressed_btn = null
-	get_viewport().disable_3d = true  # the dance covers the whole screen: skip drawing the 3D world
-	var d := DanceScene.new()
-	d.finished.connect(func():
-		get_viewport().disable_3d = false
-		d.queue_free()
-		page = Page.PAUSE
-		selected = 0
-		open_t = 0.0)
-	add_child(d)
 
 
 # ---------------------------------------------------------------- tutorial
@@ -251,8 +230,9 @@ func tut_go(d: int) -> void:
 
 
 func close_tutorial() -> void:
-	if not tutorial_seen:
+	if not tutorial_saved:
 		tutorial_seen = true
+		tutorial_saved = true
 		save_settings()
 	if tut_done.is_valid():
 		var cb := tut_done
@@ -279,8 +259,6 @@ func _input(event: InputEvent) -> void:
 			get_viewport().set_input_as_handled()
 		return
 	get_viewport().set_input_as_handled()
-	if page == Page.DANCE:
-		return  # unskippable
 	if page == Page.PAUSE:
 		match key:
 			KEY_ESCAPE, KEY_M:
@@ -351,11 +329,6 @@ func _process(delta: float) -> void:
 		Page.PAUSE:
 			active = pause_buttons
 			sel_btn = pause_buttons[selected]
-			var over_secret := secret_rect.has_point(mp)
-			secret_hover = lerpf(secret_hover, 1.0 if over_secret else 0.0, 1.0 - exp(-10.0 * delta))
-			if over_secret and just_down:
-				start_dance()
-				return
 		Page.OPTIONS:
 			active = option_buttons
 			if selected == 2:
@@ -461,7 +434,6 @@ func draw_pause() -> void:
 		b["rect"] = Rect2(win.position.x + 60 * sc, y, win.size.x - 120 * sc, bh)
 		Toon.button(self, font, b["rect"], b["label"], b["color"], b["hover"], clampf(b["press"], -0.3, 1.0), 30)
 		y += bh + gap
-	draw_secret_note(Vector2(win.end.x - 26, win.end.y - 24))
 	text(Vector2(win.position.x, win.end.y - 18), "Esc / M  to continue   ·   ↑ ↓ + Enter", 15, Color(0.75, 0.9, 1.0, 0.8), HORIZONTAL_ALIGNMENT_CENTER, win.size.x, 4)
 
 
@@ -660,19 +632,3 @@ func mini_job_bar(c: Vector2, width: float) -> void:
 	draw_circle(sk + Vector2(-5, 0), 3.5, Toon.INK)
 	draw_circle(sk + Vector2(5, 0), 3.5, Toon.INK)
 	Toon.orb(self, Vector2(x0 + (pos + 5.0) * (sw + gap) + sw / 2.0, c.y + 24), 8, Toon.GOLD, 0.5)
-
-
-func draw_secret_note(c: Vector2) -> void:
-	# Barely visible until you hover it; then it glows and wiggles.
-	secret_rect = Rect2(c - Vector2(16, 22), Vector2(32, 36))
-	var h := secret_hover
-	var a := 0.16 + 0.84 * h
-	var wob := sin(t * 12.0) * 0.25 * h
-	draw_set_transform(c, wob, Vector2.ONE * (1.0 + 0.3 * h))
-	var col := Color(1.0, 0.45, 0.85, a)
-	if h > 0.05:
-		draw_circle(Vector2(0, -4), 18, Color(1.0, 0.45, 0.85, 0.15 * h))
-	draw_circle(Vector2(-4, 6), 5.5, col)
-	draw_line(Vector2(1, 6), Vector2(1, -14), col, 2.5)
-	draw_line(Vector2(1, -14), Vector2(9, -7), col, 2.5)
-	draw_set_transform_matrix(Transform2D.IDENTITY)

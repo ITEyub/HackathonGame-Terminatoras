@@ -34,6 +34,11 @@ var selected := 0
 var mouse_was_down := false
 var pressed_idx := -1
 var activating := false
+# Layers drawn behind this node: full-screen overlays, then the static HUD panels. The panels only
+# change with the window size, so they are not rebuilt every frame (big CPU saving on slow machines).
+var under: Node2D
+var static_hud: Node2D
+var static_size := Vector2.ZERO
 
 
 func _ready() -> void:
@@ -51,12 +56,32 @@ func _ready() -> void:
 		b["hover"] = 0.0
 		b["press"] = 0.0
 		b["vel"] = 0.0
+	under = Node2D.new()
+	under.show_behind_parent = true
+	under.draw.connect(_draw_under)
+	add_child(under)
+	static_hud = Node2D.new()
+	static_hud.show_behind_parent = true
+	static_hud.draw.connect(_draw_static)
+	add_child(static_hud)
 
 
 func _process(delta: float) -> void:
 	var s := get_viewport_rect().size
 	W = s.x
 	H = s.y
+	if game != null:
+		var st: int = game.state
+		static_hud.visible = st <= 7 and st != S_GAME_OVER or st == S_COUNTDOWN
+		if static_hud.visible and static_size != s:
+			static_size = s
+			static_hud.queue_redraw()
+		var overlay: bool = game.power_flash > 0.0 or (st == S_ATTACK and game.attack_mode != "combo")
+		under.visible = overlay
+		if overlay:
+			under.queue_redraw()
+	if game != null and game.state == S_ATTACK and game.attack_mode == "quiz":
+		update_quiz_mouse()
 	if game != null and game.state == S_GAME_OVER:
 		if game.scores.blocking():
 			mouse_was_down = true  # name entry is open: ignore clicks and Enter meant for it
@@ -138,9 +163,14 @@ func _draw() -> void:
 	if st == S_TALK and not g.queue.is_empty():
 		var line: String = g.queue[0].data["line"]
 		actor_bubble(g.queue[0], line, 380.0, g.voice.shown_text() if g.voice.is_saying(line) else line)
-	elif st == S_DECIDE or st == S_ATTACK:
-		draw_thought(g.head_screen_pos(g.cashier), g.think_line if st == S_DECIDE else "GRRR!")
-		draw_subtitle(g.queue[0].data["line"], 160.0 if st == S_DECIDE else 215.0)
+	elif st == S_DECIDE or (st == S_ATTACK and g.attack_mode != "quiz"):
+		var thought: String = g.think_line
+		if st == S_ATTACK:
+			thought = "GRRR!"
+			if g.attack_mode == "rage":
+				thought = "grr..." if g.rage < 0.35 else ("GRRRR!" if g.rage < 0.75 else "RAAAAAH!!")
+		draw_thought(g.head_screen_pos(g.cashier), thought)
+		draw_subtitle(g.queue[0].data["line"], 160.0 if st == S_DECIDE else (232.0 if g.attack_mode == "rage" else 215.0))
 	for a in g.leaving:
 		if a.say_t > 0.0:
 			actor_bubble(a, a.say, 380.0, g.voice.shown_text() if g.voice.is_saying(a.say) else a.say)
@@ -153,7 +183,13 @@ func _draw() -> void:
 			draw_timer()
 			draw_controls_hint()
 		S_ATTACK:
-			draw_sequence_ui("ATTACK! Type:", g.attack_seq, g.attack_idx, g.attack_left / g.ATTACK_TIME, Color(1, 0.55, 0.15), false)
+			match g.attack_mode:
+				"rage":
+					draw_rage_ui()
+				"quiz":
+					draw_quiz_ui()
+				_:
+					draw_sequence_ui("ATTACK! Type:", g.attack_seq, g.attack_idx, g.attack_left / g.attack_time, Color(1, 0.55, 0.15), false)
 		S_FLIP:
 			draw_flip_ui()
 		S_DANCE:
@@ -320,6 +356,218 @@ func draw_controls_hint() -> void:
 
 # ---------------------------------------------------------------- minigame widgets
 
+# --- full-screen overlays (drawn by the `under` layer, beneath the HUD panels)
+
+func _draw_under() -> void:
+	var g = game
+	var ci := under
+	if g.state == S_ATTACK and g.attack_mode == "rage":
+		# red heat creeping in from the screen edges
+		var r: float = g.rage
+		if r > 0.05:
+			var pulse := 0.75 + 0.25 * sin(g.t * (8.0 + r * 14.0))
+			for k in 6:
+				var a := r * r * 0.08 * pulse
+				var m := 30.0 + k * 26.0
+				ci.draw_rect(Rect2(0, 0, W, m), Color(1, 0.05, 0.0, a))
+				ci.draw_rect(Rect2(0, H - m, W, m), Color(1, 0.05, 0.0, a))
+				ci.draw_rect(Rect2(0, 0, m, H), Color(1, 0.05, 0.0, a))
+				ci.draw_rect(Rect2(W - m, 0, m, H), Color(1, 0.05, 0.0, a))
+	if g.state == S_ATTACK and g.attack_mode == "quiz" and not g.quiz.is_empty():
+		# dim the scene like a studio with the lights down
+		ci.draw_rect(Rect2(0, 0, W, H), Color(0.0, 0.0, 0.08, 0.45))
+		for k in 3:
+			var x := W * (0.2 + 0.3 * k) + sin(g.t * 0.6 + k * 2.0) * 60.0
+			ci.draw_colored_polygon(PackedVector2Array([Vector2(x - 20, 0), Vector2(x + 20, 0), Vector2(x + 140, H), Vector2(x - 140, H)]), Color(0.45, 0.55, 1.0, 0.05))
+	if g.power_flash > 0.0:
+		ci.draw_rect(Rect2(0, 0, W, H), Color(1, 0.97, 0.8, g.power_flash * 0.8))
+
+
+# --- rage: mash space
+
+func draw_rage_ui() -> void:
+	var g = game
+	var r: float = g.rage
+	# speed lines rushing in towards him and crackling lightning once he really charges up
+	var c3 = g.cashier
+	var core: Vector2 = g.camera.unproject_position(c3.pivot.global_transform * Vector3(0, c3.height * 0.5, 0))
+	if r > 0.3:
+		var lr := RandomNumberGenerator.new()
+		lr.seed = int(g.t * 30.0)  # new pattern ~30 times a second
+		for i in 26:
+			var ang := lr.randf() * TAU
+			var d := Vector2(cos(ang), sin(ang))
+			var r0 := lr.randf_range(0.42, 0.6) * W
+			var len := lr.randf_range(60.0, 180.0) * r
+			draw_line(core + d * r0, core + d * (r0 + len), Color(1, 0.95, 0.7, 0.35 * r), lr.randf_range(1.5, 4.0))
+	if r > 0.55:
+		var br := RandomNumberGenerator.new()
+		br.seed = int(g.t * 14.0)
+		for b in int(2 + r * 4):
+			var ang := br.randf() * TAU
+			var p := core + Vector2(cos(ang), sin(ang)) * br.randf_range(70.0, 150.0)
+			var pts := PackedVector2Array([p])
+			for k in 5:
+				ang += br.randf_range(-0.9, 0.9)
+				p += Vector2(cos(ang), sin(ang)) * br.randf_range(18.0, 34.0)
+				pts.append(p)
+			draw_polyline(pts, Color(0.5, 0.85, 1.0, 0.35), 9.0)
+			draw_polyline(pts, Color(0.9, 0.97, 1.0, 0.95), 3.0)
+	# comic anger marks next to his head
+	if r > 0.2:
+		# pinned to the sides of his face (from the camera's view the front sprite faces us)
+		var c = g.cashier
+		var right: Vector2 = g.camera.unproject_position(c.pivot.global_transform * Vector3(-0.58, c.height * 0.6, 0))
+		var left: Vector2 = g.camera.unproject_position(c.pivot.global_transform * Vector3(0.55, c.height * 0.55, 0))
+		var s := (1.0 + r * 1.4) * (1.0 + 0.12 * sin(g.t * 18.0))
+		anger_mark(right, 16.0 * s)
+		if r > 0.6:
+			anger_mark(left, 12.0 * s)
+	var pw := minf(W * 0.62, 560.0)
+	var panel := Rect2(W / 2 - pw / 2, H - 186, pw, 160)
+	Toon.glass_panel(self, panel, Color(0.45, 0.06, 0.08, 0.88).lerp(Color(0.75, 0.08, 0.05, 0.92), r), 24.0)
+	var title_size := int(32 + 6 * sin(g.t * 10.0))
+	text(Vector2(panel.position.x, panel.position.y + 40), "MASH SPACE!", title_size, Toon.CREAM, HORIZONTAL_ALIGNMENT_CENTER, pw)
+	# climbing power level readout (jitters like a scouter about to blow)
+	var power := int(r * r * 9999.0) + (int(g.t * 997.0) % 37 if r > 0.05 else 0)
+	text(Vector2(panel.end.x - 210, panel.position.y + 30), "POWER %04d" % power, 17, Toon.GOLD if r < 0.9 else Color(1, 1, 1), HORIZONTAL_ALIGNMENT_RIGHT, 190, 4)
+	# rage bar: yellow -> orange -> red, flickering when nearly full
+	var bar := Rect2(panel.position.x + 30, panel.position.y + 58, pw - 60, 30)
+	var col := Color(1, 0.85, 0.2).lerp(Color(1, 0.45, 0.1), clampf(r * 2.0, 0, 1)).lerp(Color(1, 0.1, 0.05), clampf(r * 2.0 - 1.0, 0, 1))
+	if r > 0.8:
+		Toon.glow_rrect(self, bar, 15.0, Color(1, 0.3, 0.1, 0.5 + 0.3 * sin(g.t * 30.0)), 14.0, 4)
+	Toon.pill_bar(self, bar, r, col)
+	text(Vector2(bar.position.x, bar.position.y + 23), "RAGE", 18, Color(Toon.CREAM, 0.85), HORIZONTAL_ALIGNMENT_CENTER, bar.size.x, 4)
+	# keycap that sinks while space is held
+	var down := Input.is_physical_key_pressed(KEY_SPACE)
+	var key := Rect2(W / 2 - 90, panel.position.y + 100 + (4.0 if down else 0.0), 180, 34)
+	Toon.vgrad(self, Toon.rrect(Rect2(key.position + Vector2(0, 6 - (4.0 if down else 0.0)), key.size).grow(2.5), 10), Toon.INK, Toon.INK)
+	Toon.vgrad(self, Toon.rrect(key.grow(2.5), 10), Toon.INK, Toon.INK)
+	Toon.vgrad(self, Toon.rrect(key, 8), Color(0.95, 0.95, 1.0), Color(0.7, 0.75, 0.85))
+	draw_string(font, Vector2(key.position.x, key.position.y + 24), "SPACE", HORIZONTAL_ALIGNMENT_CENTER, key.size.x, 18, Toon.INK)
+	# time left
+	Toon.pill_bar(self, Rect2(panel.position.x + 30, panel.end.y - 14, pw - 60, 8), g.attack_left / g.attack_time, Toon.CYAN)
+
+
+func anger_mark(c: Vector2, s: float) -> void:
+	# the classic four-cornered comic "vein" symbol
+	for q in 4:
+		var ang := q * PI / 2.0 + PI / 4.0
+		var d := Vector2(cos(ang), sin(ang))
+		var p := c + d * s * 0.75
+		var perp := Vector2(-d.y, d.x)
+		var pts := PackedVector2Array([p + perp * s * 0.55, p - d * s * 0.25, p - perp * s * 0.55])
+		draw_polyline(pts, Toon.INK, s * 0.42 + 4.0)
+		draw_polyline(pts, Color(1, 0.15, 0.1), s * 0.42)
+
+
+# --- quiz show
+
+const QUIZ_NAVY_TOP := Color(0.05, 0.08, 0.32)
+const QUIZ_NAVY_BOT := Color(0.0, 0.02, 0.12)
+const QUIZ_EDGE := Color(0.72, 0.8, 0.95)
+var quiz_rects: Array = [Rect2(), Rect2(), Rect2(), Rect2()]
+var quiz_hover := -1
+var quiz_mouse_was_down := false
+
+
+func lozenge(r: Rect2) -> PackedVector2Array:
+	# box with pointed ends, like the classic quiz-show answer plates
+	var tip := r.size.y * 0.5
+	var cy := r.position.y + r.size.y * 0.5
+	return PackedVector2Array([
+		Vector2(r.position.x, cy), Vector2(r.position.x + tip, r.position.y), Vector2(r.end.x - tip, r.position.y),
+		Vector2(r.end.x, cy), Vector2(r.end.x - tip, r.end.y), Vector2(r.position.x + tip, r.end.y)])
+
+
+func quiz_line(r: Rect2) -> void:
+	# the thin rail running through a row of plates out to the screen edges (drawn first)
+	var cy := r.position.y + r.size.y * 0.5
+	draw_line(Vector2(0, cy), Vector2(W, cy), QUIZ_EDGE, 3.0)
+
+
+func quiz_plate(r: Rect2, top: Color, bot: Color, edge: Color) -> void:
+	var outer := lozenge(r.grow(4.0))
+	draw_colored_polygon(outer, Toon.INK)
+	var mid := lozenge(r.grow(2.0))
+	draw_colored_polygon(mid, edge)
+	Toon.vgrad(self, lozenge(r), top, bot)
+	var gloss := Rect2(r.position.x + r.size.y * 0.5, r.position.y + 3, r.size.x - r.size.y, r.size.y * 0.35)
+	Toon.vgrad(self, Toon.rrect(gloss, 6), Color(1, 1, 1, 0.16), Color(1, 1, 1, 0.0))
+
+
+func update_quiz_mouse() -> void:
+	var g = game
+	var mp := get_viewport().get_mouse_position()
+	var down := Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT)
+	quiz_hover = -1
+	for i in 4:
+		if quiz_rects[i].has_point(mp):
+			quiz_hover = i
+	if down and not quiz_mouse_was_down and quiz_hover >= 0:
+		g.quiz_answer(quiz_hover)
+	quiz_mouse_was_down = down
+
+
+func draw_quiz_ui() -> void:
+	var g = game
+	var q: Dictionary = g.quiz
+	if q.is_empty():
+		return
+	var bw := minf(W * 0.86, 900.0)
+	var x0 := W / 2 - bw / 2
+	# countdown clock
+	var cc := Vector2(W / 2, H - 316)
+	var frac: float = clampf(g.attack_left / g.attack_time, 0.0, 1.0)
+	draw_circle(cc, 38, Toon.INK)
+	draw_circle(cc, 34, QUIZ_NAVY_TOP)
+	var ring_col := Color(0.3, 0.8, 1.0).lerp(Color(1, 0.3, 0.2), 1.0 - frac)
+	if frac > 0.0:
+		draw_arc(cc, 29, -PI / 2.0, -PI / 2.0 + TAU * frac, 48, ring_col, 7.0)
+	var secs := int(ceil(g.attack_left)) if g.quiz_pick == -1 else int(ceil(maxf(g.attack_left, 0.0)))
+	text(Vector2(cc.x - 40, cc.y + 12), str(maxi(secs, 0)), 30, Toon.CREAM, HORIZONTAL_ALIGNMENT_CENTER, 80)
+	text(Vector2(x0, cc.y - 50), "QUESTION FOR ONE MEGA HIT", 16, Toon.GOLD, HORIZONTAL_ALIGNMENT_CENTER, bw, 4)
+	# question
+	var qr := Rect2(x0, H - 262, bw, 70)
+	quiz_line(qr)
+	quiz_plate(qr, QUIZ_NAVY_TOP, QUIZ_NAVY_BOT, QUIZ_EDGE)
+	draw_string(font, Vector2(qr.position.x + 50, qr.position.y + 44), q["q"], HORIZONTAL_ALIGNMENT_CENTER, qr.size.x - 100, 26, Color.WHITE)
+	# answers: A B / C D, keys follow the arrows (left, up, right, down)
+	var letters := ["A", "B", "C", "D"]
+	var aw := (bw - 24.0) / 2.0
+	var picked: int = g.quiz_pick
+	var flash := fmod(g.t, 0.24) < 0.12
+	quiz_line(Rect2(x0, H - 172, bw, 52))
+	quiz_line(Rect2(x0, H - 106, bw, 52))
+	for i in 4:
+		var r := Rect2(x0 + (i % 2) * (aw + 24.0), H - 172 + (i / 2) * 66, aw, 52)
+		quiz_rects[i] = r
+		var top := QUIZ_NAVY_TOP
+		var bot := QUIZ_NAVY_BOT
+		var letter_col := Toon.GOLD
+		var text_col := Color.WHITE
+		if picked == i and not g.quiz_revealed:
+			top = Color(1.0, 0.65, 0.15)  # "final answer"
+			bot = Color(0.85, 0.4, 0.05)
+			letter_col = Color.WHITE
+			text_col = Toon.INK
+		elif g.quiz_revealed and i == q["correct"] and (flash or picked == i):
+			top = Color(0.35, 0.9, 0.35)
+			bot = Color(0.1, 0.55, 0.15)
+			letter_col = Color.WHITE
+		elif g.quiz_revealed and picked == i:
+			top = Color(0.9, 0.2, 0.2)
+			bot = Color(0.55, 0.05, 0.08)
+			letter_col = Color.WHITE
+		elif quiz_hover == i and picked == -1:
+			top = QUIZ_NAVY_TOP.lightened(0.25)
+		quiz_plate(r, top, bot, QUIZ_EDGE)
+		Toon.arrow_glyph(self, Vector2(r.position.x + 40, r.get_center().y), i, 9.0, letter_col)
+		draw_string(font, Vector2(r.position.x + 56, r.position.y + 34), letters[i] + ":", HORIZONTAL_ALIGNMENT_LEFT, -1, 22, letter_col)
+		draw_string(font, Vector2(r.position.x + 90, r.position.y + 34), q["answers"][i], HORIZONTAL_ALIGNMENT_LEFT, r.size.x - 120, 22, text_col)
+	text(Vector2(0, H - 14), "Arrow keys, 1-4 or click", 14, Color(0.75, 0.85, 1.0, 0.8), HORIZONTAL_ALIGNMENT_CENTER, W, 4)
+
+
 func draw_sequence_ui(title: String, seq: Array, idx: int, frac: float, bar_col: Color, hidden: bool) -> void:
 	var g = game
 	var n := seq.size()
@@ -395,13 +643,10 @@ func draw_pray_ui() -> void:
 # ---------------------------------------------------------------- HUD
 
 func draw_hud() -> void:
+	# panels, coin and job bar slots live in static_hud (_draw_static); only live values here
 	var g = game
-	Toon.glass_panel(self, Rect2(16, 16, 254, 76), Toon.GLASS_BLUE, 22.0)
-	Toon.orb(self, Vector2(48, 46), 17, Toon.GOLD)
-	text(Vector2(36, 54), "$", 22, Toon.CREAM, HORIZONTAL_ALIGNMENT_CENTER, 24, 4)
 	text(Vector2(74, 56), "%d" % g.score, 32, Toon.CREAM)
 	text(Vector2(74, 82), "Highscore: %d" % g.highscore, 15, Color(0.8, 0.95, 1.0), HORIZONTAL_ALIGNMENT_LEFT, -1, 4)
-	Toon.glass_panel(self, Rect2(W - 246, 16, 230, 76), Toon.GLASS_GREEN, 22.0)
 	var mcol: Color = Toon.CREAM.lerp(Toon.GOLD, (g.mult - 1) / float(g.MAX_MULT - 1))
 	text(Vector2(W - 246, 64), "x%d" % g.mult, 44, mcol, HORIZONTAL_ALIGNMENT_RIGHT, 214)
 	var lit := int(round((g.mult - 1) / float(g.MAX_MULT - 1) * 5.0))
@@ -419,7 +664,25 @@ func draw_job_bar() -> void:
 	var total := n * slot_w + (n - 1) * gap
 	var x0 := W / 2.0 - total / 2.0
 	var y := 26.0
-	Toon.glass_panel(self, Rect2(x0 - 58, 16, total + 80, 76), Toon.GLASS_DEEP, 22.0)
+	var px: float = x0 + (g.bar_shown + g.BAR_MAX) * (slot_w + gap) + slot_w / 2.0
+	Toon.orb(self, Vector2(px, y + 34), 8, Toon.GOLD, 0.5)
+
+
+func _draw_static() -> void:
+	# The parts of the top HUD that never change during a round.
+	var ci := static_hud
+	var g = game
+	Toon.glass_panel(ci, Rect2(16, 16, 254, 76), Toon.GLASS_BLUE, 22.0)
+	Toon.orb(ci, Vector2(48, 46), 17, Toon.GOLD)
+	Toon.toon_text(ci, font, Vector2(36, 54), "$", 22, Toon.CREAM, HORIZONTAL_ALIGNMENT_CENTER, 24, 4)
+	Toon.glass_panel(ci, Rect2(W - 246, 16, 230, 76), Toon.GLASS_GREEN, 22.0)
+	var slot_w := 27.0
+	var gap := 5.0
+	var n: int = g.BAR_MAX * 2 + 1
+	var total := n * slot_w + (n - 1) * gap
+	var x0 := W / 2.0 - total / 2.0
+	var y := 26.0
+	Toon.glass_panel(ci, Rect2(x0 - 58, 16, total + 80, 76), Toon.GLASS_DEEP, 22.0)
 	for i in n:
 		var v: int = i - g.BAR_MAX
 		var col: Color
@@ -430,21 +693,19 @@ func draw_job_bar() -> void:
 		else:
 			col = Color(0.7, 1.0, 0.45).lerp(Color(0.1, 0.75, 0.3), float(v) / g.BAR_MAX)
 		var r := Rect2(x0 + i * (slot_w + gap), y, slot_w, 20)
-		Toon.vgrad(self, Toon.rrect(r.grow(2.5), 9), Toon.INK, Toon.INK)
-		Toon.vgrad(self, Toon.rrect(r, 7), col.lightened(0.3), col.darkened(0.25))
-		Toon.vgrad(self, Toon.rrect(Rect2(r.position + Vector2(3, 2), Vector2(r.size.x - 6, 7)), 3.5), Color(1, 1, 1, 0.75), Color(1, 1, 1, 0.1))
-	draw_skull(Vector2(x0 - 30, y + 10))
-	var px: float = x0 + (g.bar_shown + g.BAR_MAX) * (slot_w + gap) + slot_w / 2.0
-	Toon.orb(self, Vector2(px, y + 34), 8, Toon.GOLD, 0.5)
-	text(Vector2(x0, y + 60), "JOB", 15, Toon.CREAM, HORIZONTAL_ALIGNMENT_CENTER, total, 4)
+		Toon.vgrad(ci, Toon.rrect(r.grow(2.5), 9), Toon.INK, Toon.INK)
+		Toon.vgrad(ci, Toon.rrect(r, 7), col.lightened(0.3), col.darkened(0.25))
+		Toon.vgrad(ci, Toon.rrect(Rect2(r.position + Vector2(3, 2), Vector2(r.size.x - 6, 7)), 3.5), Color(1, 1, 1, 0.75), Color(1, 1, 1, 0.1))
+	draw_skull(ci, Vector2(x0 - 30, y + 10))
+	Toon.toon_text(ci, font, Vector2(x0, y + 60), "JOB", 15, Toon.CREAM, HORIZONTAL_ALIGNMENT_CENTER, total, 4)
 
 
-func draw_skull(c: Vector2) -> void:
-	Toon.orb(self, c, 14, Color(0.85, 0.88, 0.95))
-	draw_circle(c + Vector2(-5, 0), 3.5, Toon.INK)
-	draw_circle(c + Vector2(5, 0), 3.5, Toon.INK)
+func draw_skull(ci: CanvasItem, c: Vector2) -> void:
+	Toon.orb(ci, c, 14, Color(0.85, 0.88, 0.95))
+	ci.draw_circle(c + Vector2(-5, 0), 3.5, Toon.INK)
+	ci.draw_circle(c + Vector2(5, 0), 3.5, Toon.INK)
 	for k in 3:
-		draw_line(Vector2(c.x - 4 + k * 4, c.y + 6), Vector2(c.x - 4 + k * 4, c.y + 11), Toon.INK, 1.5)
+		ci.draw_line(Vector2(c.x - 4 + k * 4, c.y + 6), Vector2(c.x - 4 + k * 4, c.y + 11), Toon.INK, 1.5)
 
 
 func draw_popups() -> void:
